@@ -3,3 +3,6 @@ uvicorn==0.54.0
 # TestClient uses HTTPX 0.28 and the AnyIO BlockingPortal alias.
 starlette==0.52.1
 anyio==4.9.0
+SQLAlchemy==2.0.55
+alembic==1.18.4
+psycopg[binary]==3.3.3

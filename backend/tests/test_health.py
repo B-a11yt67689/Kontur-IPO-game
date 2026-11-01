@@ -1,9 +1,19 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 
 
-def test_health_returns_ok_on_repeated_requests() -> None:
+@pytest.mark.parametrize(
+    "url", [None, "invalid", "postgresql+psycopg://localhost:1/no_db"]
+)
+def test_health_returns_ok_on_repeated_requests(
+    monkeypatch: pytest.MonkeyPatch, url: str | None
+) -> None:
+    if url is None:
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("DATABASE_URL", url)
     with TestClient(app) as client:
         for _ in range(2):
             response = client.get("/health")
