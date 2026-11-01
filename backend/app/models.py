@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Text, Uuid, text
+from sqlalchemy import CheckConstraint, DateTime, Text, Uuid, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -13,6 +13,11 @@ class Base(DeclarativeBase):
 
 class GameSession(Base):
     __tablename__ = "game_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(name) <= 255", name="ck_game_sessions_name_length"
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         Uuid, primary_key=True, server_default=text("gen_random_uuid()")

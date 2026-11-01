@@ -1,69 +1,13 @@
-"""Real PostgreSQL tests; require an empty, explicitly named *_test database."""
+"""Real PostgreSQL persistence and schema tests."""
 
-import os
-from collections.abc import Iterator
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from alembic.config import Config
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
-from alembic import command
-from app.database import create_database_engine, database_url, transaction
+from app.database import create_database_engine, transaction
 from app.models import GameSession
-
-BACKEND = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture(scope="module")
-def migrated_database() -> Iterator[str]:
-    value = os.environ.get("TEST_DATABASE_URL")
-    if not value:
-        pytest.fail("Set TEST_DATABASE_URL to an empty dedicated *_test PostgreSQL DB")
-    url = database_url(value)
-    if not url.database.endswith("_test"):
-        pytest.fail("TEST_DATABASE_URL database name must end with _test")
-    development = os.environ.get("DATABASE_URL")
-    if development:
-        dev_url = database_url(development)
-        if (url.host, url.port or 5432, url.database) == (
-            dev_url.host,
-            dev_url.port or 5432,
-            dev_url.database,
-        ):
-            pytest.fail("Test and development databases must be different")
-    engine = create_database_engine(value)
-    try:
-        with engine.connect() as connection:
-            if connection.scalar(text("SELECT current_schema()")) != "public":
-                pytest.fail("Test DB must use the public schema")
-            inspector = inspect(connection)
-            if inspector.get_table_names(schema="public") or inspector.get_view_names(
-                schema="public"
-            ):
-                pytest.fail("Test DB public schema must be empty; nothing was changed")
-    finally:
-        engine.dispose()
-
-    config = Config(str(BACKEND / "alembic.ini"))
-    # Use the same Alembic environment as the CLI, without logging the URL.
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("DATABASE_URL", value)
-        command.upgrade(config, "head")
-        try:
-            command.upgrade(config, "head")
-            yield value
-        finally:
-            command.downgrade(config, "base")
-            # Alembic retains its empty version table on downgrade.
-            engine = create_database_engine(value)
-            try:
-                with engine.begin() as connection:
-                    connection.execute(text("DROP TABLE alembic_version"))
-            finally:
-                engine.dispose()
 
 
 def test_migration_schema(migrated_database: str) -> None:
@@ -84,7 +28,7 @@ def test_migration_schema(migrated_database: str) -> None:
             assert not inspector.get_unique_constraints("game_sessions")
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("0001_game_sessions")
+            ) == ("0002_session_name_length")
     finally:
         engine.dispose()
 
@@ -172,3 +116,63 @@ def test_failed_transaction_leaves_no_partial_data(
             )
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("name", ["ю" * 255, "🦊" * 255])
+def test_database_accepts_name_boundary(migrated_database: str, name: str) -> None:
+    engine = create_database_engine(migrated_database)
+    try:
+        with transaction(engine) as session:
+            session.add(GameSession(name=name))
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("name", ["я" * 256, "🚀" * 256])
+def test_database_rejects_long_name(migrated_database: str, name: str) -> None:
+    engine = create_database_engine(migrated_database)
+    try:
+        with pytest.raises(IntegrityError), transaction(engine) as session:
+            session.add(GameSession(name=name))
+    finally:
+        engine.dispose()
+
+
+def test_length_migration_preserves_existing_long_name(migrated_database: str) -> None:
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    from alembic import command
+
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    engine = create_database_engine(migrated_database)
+    identifier = uuid4()
+    name = "legacy" * 50
+    command.downgrade(config, "0001_game_sessions")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.insert().values(id=identifier, name=name)
+            )
+        with pytest.raises(IntegrityError):
+            command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    select(GameSession.name).where(GameSession.id == identifier)
+                )
+                == name
+            )
+            assert connection.scalar(
+                text("SELECT version_num FROM alembic_version")
+            ) == ("0001_game_sessions")
+    finally:
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    GameSession.__table__.delete().where(GameSession.id == identifier)
+                )
+            command.upgrade(config, "head")
+        finally:
+            engine.dispose()
