@@ -1,10 +1,13 @@
 """API integration tests against the migrated, dedicated PostgreSQL database."""
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
@@ -97,6 +100,140 @@ def test_server_owned_fields_rejected(
     response = client.post("/sessions", json={"name": name, field: value})
     assert response.status_code == 422
     assert stored_rows(migrated_database, name) == []
+
+
+def test_preparation_start_requires_admin(client: TestClient) -> None:
+    session_id = UUID(client.post("/sessions", json={"name": "IPO team"}).json()["id"])
+    admin_authorization = client.headers.pop("Authorization")
+    try:
+        missing = client.post(f"/sessions/{session_id}/preparation/start")
+        invalid = client.post(
+            f"/sessions/{session_id}/preparation/start",
+            headers={"Authorization": "Bearer invalid"},
+        )
+    finally:
+        client.headers["Authorization"] = admin_authorization
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+
+
+def test_preparation_start_unknown_session_returns_404(client: TestClient) -> None:
+    response = client.post(f"/sessions/{uuid4()}/preparation/start")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Session not found"}
+
+
+def test_preparation_start_persists_and_returns_idempotent_state(
+    client: TestClient,
+) -> None:
+    created = client.post("/sessions", json={"name": "IPO team"}).json()
+    session_id = UUID(created["id"])
+    path = f"/sessions/{session_id}/preparation/start"
+
+    started = client.post(path)
+    repeated = client.post(path)
+
+    assert started.status_code == 200
+    assert set(started.json()) == {"id", "name", "status", "created_at"}
+    assert started.json() == {
+        **created,
+        "status": "preparation",
+    }
+    assert repeated.status_code == 200
+    assert repeated.json() == started.json()
+
+
+def test_concurrent_preparation_starts_transition_once(client: TestClient) -> None:
+    session_id = UUID(client.post("/sessions", json={"name": "IPO team"}).json()["id"])
+    path = f"/sessions/{session_id}/preparation/start"
+    barrier = Barrier(2)
+
+    def start() -> object:
+        barrier.wait()
+        return client.post(path)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _: start(), range(2)))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.json()["status"] for response in responses] == [
+        "preparation",
+        "preparation",
+    ]
+    assert responses[0].json() == responses[1].json()
+
+
+def test_preparation_retry_republishes_after_post_commit_publish_failure(
+    client: TestClient,
+    migrated_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = UUID(client.post("/sessions", json={"name": "IPO team"}).json()["id"])
+    hub = app.state.lobby_hub
+    publish_attempts = 0
+
+    async def fail_once(requested_session_id: UUID) -> None:
+        nonlocal publish_attempts
+        assert requested_session_id == session_id
+        publish_attempts += 1
+        if publish_attempts == 1:
+            raise HTTPException(status_code=503, detail="Lobby unavailable")
+
+    monkeypatch.setattr(hub, "publish", fail_once)
+    path = f"/sessions/{session_id}/preparation/start"
+
+    failed_publish = client.post(path)
+    engine = create_database_engine(migrated_database)
+    try:
+        with engine.connect() as connection:
+            persisted_status = connection.scalar(
+                select(GameSession.status).where(GameSession.id == session_id)
+            )
+    finally:
+        engine.dispose()
+    retry = client.post(path)
+
+    assert failed_publish.status_code == 503
+    assert persisted_status == "preparation"
+    assert retry.status_code == 200
+    assert retry.json()["status"] == "preparation"
+    assert publish_attempts == 2
+
+
+def test_preparation_start_database_error_is_sanitized(
+    client: TestClient, migrated_database: str
+) -> None:
+    session_id = UUID(client.post("/sessions", json={"name": "IPO team"}).json()["id"])
+    engine = create_database_engine(migrated_database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                CREATE FUNCTION ipo008_reject_preparation() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'private SQL/DSN/traceback sentinel';
+                END; $$
+            """)
+            )
+            connection.execute(
+                text("""
+                CREATE TRIGGER ipo008_reject BEFORE UPDATE OF status
+                ON game_sessions FOR EACH ROW
+                EXECUTE FUNCTION ipo008_reject_preparation()
+            """)
+            )
+        try:
+            response = client.post(f"/sessions/{session_id}/preparation/start")
+            assert response.status_code == 503
+            assert response.json() == {"detail": "Preparation start unavailable"}
+            assert "sentinel" not in response.text
+        finally:
+            with engine.begin() as connection:
+                connection.execute(text("DROP TRIGGER ipo008_reject ON game_sessions"))
+                connection.execute(text("DROP FUNCTION ipo008_reject_preparation()"))
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize("phase", ["write", "commit"])

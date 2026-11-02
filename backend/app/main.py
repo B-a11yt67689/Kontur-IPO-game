@@ -319,6 +319,47 @@ def create_session(payload: SessionCreate) -> SessionCreated:
         ) from None
 
 
+def _start_preparation(session_id: UUID) -> SessionCreated:
+    try:
+        engine = create_database_engine()
+        try:
+            with transaction(engine) as session:
+                game = session.scalar(
+                    select(GameSession)
+                    .where(GameSession.id == session_id)
+                    .with_for_update()
+                )
+                if game is None:
+                    raise HTTPException(status_code=404, detail="Session not found")
+                if game.status == "lobby":
+                    game.status = "preparation"
+                    session.flush()
+                elif game.status != "preparation":
+                    raise HTTPException(
+                        status_code=409, detail="Session cannot start preparation"
+                    )
+                response = SessionCreated.model_validate(game)
+            return response
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, ValueError):
+        raise HTTPException(
+            status_code=503, detail="Preparation start unavailable"
+        ) from None
+
+
+@app.post(
+    "/sessions/{session_id}/preparation/start",
+    response_model=SessionCreated,
+    dependencies=[Depends(require_admin)],
+)
+async def start_preparation(request: Request, session_id: UUID) -> SessionCreated:
+    """Start preparation once and publish its snapshot on every successful retry."""
+    response = await run_in_threadpool(_start_preparation, session_id)
+    await request.app.state.lobby_hub.publish(session_id)
+    return response
+
+
 def _join_participant(session_id: UUID, payload: ParticipantJoin) -> ParticipantJoined:
     credential = secrets.token_urlsafe(32)
     credential_digest = hashlib.sha256(credential.encode("utf-8")).hexdigest()

@@ -108,6 +108,59 @@ def test_initial_snapshot_updates_on_join_and_reconnect(client: TestClient) -> N
         )
 
 
+def test_preparation_transition_broadcasts_and_retries_republish_snapshot(
+    client: TestClient,
+) -> None:
+    session_id = create_session(client)
+    participant = join(client, session_id, "First")
+    second_participant = join(client, session_id, "Second")
+    admin_authorization = client.headers.pop("Authorization")
+    try:
+        with (
+            client.websocket_connect(
+                websocket_url(session_id),
+                subprotocols=[
+                    f"ipo-participant.{participant['participant_credential']}"
+                ],
+            ) as first_websocket,
+            client.websocket_connect(
+                websocket_url(session_id),
+                subprotocols=[
+                    f"ipo-participant.{second_participant['participant_credential']}"
+                ],
+            ) as second_websocket,
+        ):
+            initial = first_websocket.receive_json()
+            assert second_websocket.receive_json() == initial
+            assert initial["status"] == "lobby"
+            path = f"/sessions/{session_id}/preparation/start"
+            admin_headers = {"Authorization": admin_authorization}
+            started = client.post(path, headers=admin_headers)
+            assert started.status_code == 200
+            expected_update = {**initial, "status": "preparation"}
+            assert first_websocket.receive_json() == expected_update
+            assert second_websocket.receive_json() == expected_update
+
+            connection_state = app.state.lobby_hub._sessions.get(session_id)
+            assert connection_state is not None
+            revision_after_transition = connection_state.revision
+            repeated = client.post(path, headers=admin_headers)
+            assert repeated.status_code == 200
+            assert repeated.json() == started.json()
+            assert first_websocket.receive_json() == expected_update
+            assert second_websocket.receive_json() == expected_update
+            assert connection_state.revision > revision_after_transition
+    finally:
+        client.headers["Authorization"] = admin_authorization
+
+    snapshot = client.get(
+        f"/sessions/{session_id}/lobby",
+        headers={"Authorization": f"Bearer {participant['participant_credential']}"},
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "preparation"
+
+
 def test_websocket_rejects_missing_invalid_and_wrong_session_credentials(
     client: TestClient,
 ) -> None:
