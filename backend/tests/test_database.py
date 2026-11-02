@@ -26,9 +26,28 @@ def test_migration_schema(migrated_database: str) -> None:
                 "constrained_columns"
             ] == ["id"]
             assert not inspector.get_unique_constraints("game_sessions")
+            participant_columns = {
+                column["name"]: column
+                for column in inspector.get_columns("participants")
+            }
+            assert set(participant_columns) == {
+                "id",
+                "session_id",
+                "display_name",
+                "credential_digest",
+                "created_at",
+            }
+            assert all(
+                not column["nullable"] for column in participant_columns.values()
+            )
+            assert participant_columns["credential_digest"]["type"].length == 64
+            assert (
+                inspector.get_foreign_keys("participants")[0]["referred_table"]
+                == "game_sessions"
+            )
             assert connection.scalar(
                 text("SELECT version_num FROM alembic_version")
-            ) == ("0002_session_name_length")
+            ) == ("0003_participants")
     finally:
         engine.dispose()
 

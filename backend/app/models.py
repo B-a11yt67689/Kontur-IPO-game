@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, Text, Uuid, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, Uuid, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -26,6 +26,37 @@ class GameSession(Base):
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'lobby'")
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class Participant(Base):
+    __tablename__ = "participants"
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(display_name) <= 255",
+            name="ck_participants_display_name_length",
+        ),
+        CheckConstraint(
+            "char_length(credential_digest) = 64",
+            name="ck_participants_credential_digest_length",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("game_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

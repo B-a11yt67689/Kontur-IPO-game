@@ -151,6 +151,8 @@ Alembic можно откатить командой `python -m alembic downgrad
 перед повторным применением миграции.
 Статус хранится текстом с начальным значением `lobby`; список последующих статусов
 и переходы ещё не определены, ограничение на их набор не вводится.
+Участники хранятся отдельно в `participants` и связаны с сессией через внешний ключ.
+Миграция `0003_participants` добавляет эту таблицу; отображаемые имена не уникальны.
 
 Документация: [SQLAlchemy + psycopg](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg),
 [Alembic](https://alembic.sqlalchemy.org/en/latest/tutorial.html).
@@ -186,6 +188,51 @@ ORM-сессия закрывается, engine освобождается по�
 PostgreSQL с теми же требованиями к `TEST_DATABASE_URL`, что и полный набор.
 В том числе тесты читают запись через новый engine после ответа, вызывают
 реальную ошибку записи и отложенную до commit ошибку PostgreSQL и проверяют откат.
+
+## Вход участника в сессию
+
+Участник присоединяется по UUID приглашённой сессии; отдельный публичный список
+сессий и дополнительные права для участника в этом API не вводятся. Имя является
+только отображаемой подписью: совпадающие имена создают разные записи с разными
+ID и учётными данными и не дают доступа к чужой записи.
+
+```powershell
+$sessionId = 'UUID сессии из приглашения'
+$body = @{ display_name = 'Аналитик' } | ConvertTo-Json
+$participant = Invoke-RestMethod -Method Post `
+    -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants" `
+    -ContentType 'application/json; charset=utf-8' `
+    -Body ([Text.Encoding]::UTF8.GetBytes($body))
+# Не выводите participant_credential; сохраните его на клиенте для восстановления.
+```
+
+`POST /sessions/{session_id}/participants` принимает `display_name` длиной
+1–255 символов после обрезки пробелов и возвращает `201` с `id`,
+`display_name`, случайным `participant_credential` и `token_type="bearer"`.
+Секрет показывается только при присоединении. Сервер хранит только SHA-256 digest
+случайного токена, не сам bearer credential. Клиенту необходимо сохранить его
+в собственном защищённом хранилище, чтобы восстановить личность после обновления
+страницы или переподключения.
+
+Для восстановления клиент передаёт этот credential как Bearer-токен:
+
+```powershell
+$identity = Invoke-RestMethod -Method Get `
+    -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants/me" `
+    -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+```
+
+`GET /sessions/{session_id}/participants/me` возвращает ID, отображаемое имя и
+время создания; credential в этом ответе отсутствует. Неверный, отсутствующий
+или относящийся к другой сессии credential даёт `401`; неизвестная сессия при
+присоединении даёт `404`. Невалидное имя даёт `422`, недоступность БД —
+санитизированный `503`. Идентичность определяется только случайным credential,
+а не именем. Лобби, realtime-обновления и запуск игры этим API не реализованы.
+
+`python -m pytest tests/test_participants.py` проверяет присоединение,
+восстановление после нового HTTP-клиента, отдельные идентичности при совпадающих
+именах, изоляцию по сессии, ошибки авторизации и отсутствие исходного credential
+в PostgreSQL.
 
 ## Вход администратора
 

@@ -36,3 +36,26 @@ class SessionCreated(BaseModel):
     name: str
     status: str
     created_at: datetime
+
+
+class ParticipantJoin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+    ]
+
+
+class ParticipantJoined(BaseModel):
+    id: UUID
+    display_name: str
+    participant_credential: str
+    token_type: str = "bearer"
+
+
+class ParticipantIdentity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    display_name: str
+    created_at: datetime
