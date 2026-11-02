@@ -158,13 +158,14 @@ Alembic можно откатить командой `python -m alembic downgrad
 
 ## Создание сессии через API
 
-Endpoint доступен только для локальной разработки; авторизация администратора
-будет отдельной задачей. Перед запросом задайте `DATABASE_URL` и примените
+Endpoint требует Bearer-токен администратора. Перед запросом задайте `DATABASE_URL` и примените
 `python -m alembic upgrade head`, как описано выше. Затем запустите сервер.
+В этом же окне сначала настройте администратора по следующему разделу.
 
 ```powershell
 $body = @{ name = '  Команда 1  ' } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/sessions `
+    -Headers @{ Authorization = "Bearer $($login.access_token)" } `
     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
@@ -185,3 +186,56 @@ ORM-сессия закрывается, engine освобождается по�
 PostgreSQL с теми же требованиями к `TEST_DATABASE_URL`, что и полный набор.
 В том числе тесты читают запись через новый engine после ответа, вызывают
 реальную ошибку записи и отложенную до commit ошибку PostgreSQL и проверяют откат.
+
+## Вход администратора
+
+В предварительной модели есть один администратор из окружения, без таблицы
+пользователей, регистрации, refresh-токенов и интерфейса входа. Используются
+PyJWT 2.10.1 и argon2-cffi 25.1.0. Argon2 — рекомендуемый алгоритм в
+[официальном руководстве FastAPI](https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/).
+Готовая библиотека Argon2 проверяет хеш; криптография приложения не реализуется.
+
+В окне запуска сервера задайте три переменные. Пароль вводится без отображения,
+хеш и случайный ключ передаются из дочернего Python в переменные PowerShell
+без вывода в консоль. Не сохраняйте эти значения в репозитории или истории команд:
+
+```powershell
+$env:ADMIN_USERNAME = Read-Host 'Логин администратора'
+$env:ADMIN_PASSWORD_HASH = python -c "from getpass import getpass; from argon2 import PasswordHasher; p=getpass('Admin password: '); assert p, 'Password must not be empty'; print(PasswordHasher().hash(p))"
+$env:JWT_SIGNING_KEY = python -c "import secrets; print(secrets.token_urlsafe(48))"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+`ADMIN_USERNAME` — непустая строка; `ADMIN_PASSWORD_HASH` — корректный Argon2-хеш
+непустого пароля; `JWT_SIGNING_KEY` — случайный секрет минимум 32 байта UTF-8
+(проверка длины не доказывает случайность, используйте генератор выше).
+Переменные читаются при запросе, `.env` автоматически не загружается.
+При отсутствующей или испорченной настройке вход и защищённый доступ дают `401`.
+Ключа по умолчанию нет. `/health` не требует этих настроек и не обращается к БД.
+
+Во втором окне выполните JSON-вход, затем команду создания сессии выше:
+
+```powershell
+$credential = Get-Credential -Message 'Администратор IPO'
+$body = @{ username = $credential.UserName; password = $credential.GetNetworkCredential().Password } | ConvertTo-Json
+$login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/auth/login `
+    -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+Remove-Variable body, credential
+# Не выводите access_token: используйте $login в Authorization при создании сессии.
+```
+
+Успех входа: `200` с `access_token`, `token_type="bearer"`, `expires_in=1800`.
+JWT содержит только логин в `sub` и срок в `exp`; содержимое JWT доступно читателю
+токена, пароль и хеш туда не включаются. Подпись HS256 фиксирована сервером;
+`sub` и `exp` обязательны, `sub` должен совпадать с настроенным администратором.
+Неверный логин или пароль дают одинаковый `401 {"detail":"Invalid credentials"}`.
+Некорректное тело входа даёт `422 {"detail":"Invalid login request"}` без отражения
+введённых данных. Отсутствующий, просроченный, подменённый или некорректный Bearer
+даёт `401` до обращения к БД и создания записи. После истечения 30 минут войдите
+повторно. Смена ключа аннулирует прежние токены; смена пароля сама по себе их
+не отзывает. Индивидуальный отзыв, rate limiting и аудит входов пока не реализованы.
+Для доступа вне loopback требуется HTTPS на уровне развёртывания.
+
+`python -m pytest tests/test_auth.py` проверяет вход, JWT, безопасные ошибки
+и отказы с проверкой отсутствия записи на выделенной PostgreSQL. Полный набор
+сохраняет прежние проверки IPO-001–003 и использует настоящий вход для API-тестов.

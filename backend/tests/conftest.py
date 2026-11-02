@@ -1,17 +1,52 @@
 """Real PostgreSQL tests; require an empty, explicitly named *_test database."""
 
 import os
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
+from argon2 import PasswordHasher
+from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
 
 from alembic import command
 from app.database import create_database_engine, database_url
+from app.main import app
 
 BACKEND = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="session")
+def admin_hash() -> str:
+    return PasswordHasher().hash("fictional-test-password")
+
+
+@pytest.fixture
+def auth_config(monkeypatch: pytest.MonkeyPatch, admin_hash: str) -> dict[str, str]:
+    settings = {
+        "ADMIN_USERNAME": "fictional-test-admin",
+        "ADMIN_PASSWORD_HASH": admin_hash,
+        "JWT_SIGNING_KEY": secrets.token_urlsafe(48),
+    }
+    for key, value in settings.items():
+        monkeypatch.setenv(key, value)
+    return settings
+
+
+@pytest.fixture
+def admin_headers(auth_config: dict[str, str]) -> dict[str, str]:
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/login",
+            json={
+                "username": auth_config["ADMIN_USERNAME"],
+                "password": "fictional-test-password",
+            },
+        )
+        assert response.status_code == 200
+        return {"Authorization": "Bearer " + response.json()["access_token"]}
 
 
 @pytest.fixture(scope="session")

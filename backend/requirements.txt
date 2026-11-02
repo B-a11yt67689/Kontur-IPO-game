@@ -6,3 +6,5 @@ anyio==4.9.0
 SQLAlchemy==2.0.55
 alembic==1.18.4
 psycopg[binary]==3.3.3
+PyJWT==2.10.1
+argon2-cffi==25.1.0

@@ -15,10 +15,12 @@ from app.models import GameSession
 
 @pytest.fixture
 def client(
-    migrated_database: str, monkeypatch: pytest.MonkeyPatch
+    migrated_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    admin_headers: dict[str, str],
 ) -> Iterator[TestClient]:
     monkeypatch.setenv("DATABASE_URL", migrated_database)
-    with TestClient(app) as client:
+    with TestClient(app, headers=admin_headers) as client:
         yield client
 
 
@@ -150,13 +152,13 @@ def test_database_failure_is_sanitized_and_rolled_back(
     ],
 )
 def test_database_configuration_failure_is_sanitized(
-    monkeypatch: pytest.MonkeyPatch, url: str | None
+    monkeypatch: pytest.MonkeyPatch, url: str | None, admin_headers: dict[str, str]
 ) -> None:
     if url is None:
         monkeypatch.delenv("DATABASE_URL", raising=False)
     else:
         monkeypatch.setenv("DATABASE_URL", url)
-    with TestClient(app) as client:
+    with TestClient(app, headers=admin_headers) as client:
         response = client.post("/sessions", json={"name": "example"})
         assert response.status_code == 503
         assert response.json() == {"detail": "Session creation unavailable"}
