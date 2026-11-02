@@ -61,6 +61,15 @@ def join(client: TestClient, session_id: UUID, display_name: str) -> dict[str, s
     return response.json()
 
 
+def assert_lobby_has_no_secrets(response_body: str, credentials: list[str]) -> None:
+    assert "participant_credential" not in response_body
+    for credential in credentials:
+        assert credential not in response_body
+        assert (
+            hashlib.sha256(credential.encode("utf-8")).hexdigest() not in response_body
+        )
+
+
 def test_join_persists_and_recovers_identity(
     client: TestClient, migrated_database: str
 ) -> None:
@@ -151,6 +160,83 @@ def test_unknown_session_cannot_be_joined(client: TestClient) -> None:
     )
     assert response.status_code == 404
     assert response.json() == {"detail": "Session not found"}
+
+
+def test_lobby_snapshot_has_exact_shape_and_current_session_state(
+    client: TestClient,
+) -> None:
+    session_id = create_session(client)
+    participant = join(client, session_id, "Analyst")
+
+    response = client.get(
+        f"/sessions/{session_id}/lobby",
+        headers={"Authorization": f"Bearer {participant['participant_credential']}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": str(session_id),
+        "name": "IPO team",
+        "status": "lobby",
+        "participants": [
+            {"id": participant["id"], "display_name": "Analyst"},
+        ],
+    }
+    assert_lobby_has_no_secrets(response.text, [participant["participant_credential"]])
+
+
+def test_lobby_reconnect_shows_participants_who_joined_since_last_request(
+    client: TestClient,
+) -> None:
+    session_id = create_session(client)
+    first = join(client, session_id, "First")
+    second = join(client, session_id, "Second")
+    expected_participants = [
+        {"id": first["id"], "display_name": "First"},
+        {"id": second["id"], "display_name": "Second"},
+    ]
+
+    for participant in (first, second):
+        with TestClient(app) as reconnected_client:
+            response = reconnected_client.get(
+                f"/sessions/{session_id}/lobby",
+                headers={
+                    "Authorization": (f"Bearer {participant['participant_credential']}")
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["participants"] == expected_participants
+        assert_lobby_has_no_secrets(
+            response.text,
+            [first["participant_credential"], second["participant_credential"]],
+        )
+
+
+def test_lobby_requires_a_credential_scoped_to_the_session(
+    client: TestClient,
+) -> None:
+    first_session = create_session(client)
+    second_session = create_session(client)
+    first = join(client, first_session, "First")
+    second = join(client, second_session, "Second")
+    lobby_url = f"/sessions/{first_session}/lobby"
+
+    for headers in (
+        {},
+        {"Authorization": "Bearer invalid-credential"},
+        {"Authorization": f"Bearer {second['participant_credential']}"},
+    ):
+        response = client.get(lobby_url, headers=headers)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid participant credentials"}
+
+    unknown = client.get(
+        f"/sessions/{uuid4()}/lobby",
+        headers={"Authorization": f"Bearer {first['participant_credential']}"},
+    )
+    assert unknown.status_code == 404
+    assert unknown.json() == {"detail": "Session not found"}
 
 
 @pytest.mark.parametrize("display_name", ["", "  ", "я" * 256])

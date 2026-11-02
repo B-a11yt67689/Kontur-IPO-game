@@ -16,6 +16,8 @@ from app.auth import login_token, require_admin
 from app.database import create_database_engine, transaction
 from app.models import GameSession, Participant
 from app.schemas import (
+    LobbyParticipant,
+    LobbySnapshot,
     LoginRequest,
     LoginResponse,
     ParticipantIdentity,
@@ -157,4 +159,60 @@ def get_my_participant(
     except (SQLAlchemyError, ValueError):
         raise HTTPException(
             status_code=503, detail="Participant lookup unavailable"
+        ) from None
+
+
+@app.get("/sessions/{session_id}/lobby", response_model=LobbySnapshot)
+def get_lobby(
+    session_id: UUID,
+    credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+) -> LobbySnapshot:
+    """Return an authenticated snapshot of the session's current lobby state."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid participant credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    credential_digest = hashlib.sha256(
+        credentials.credentials.encode("utf-8")
+    ).hexdigest()
+    try:
+        engine = create_database_engine()
+        try:
+            with transaction(engine) as session:
+                game = session.get(GameSession, session_id)
+                if game is None:
+                    raise HTTPException(status_code=404, detail="Session not found")
+                participant = session.scalar(
+                    select(Participant.id).where(
+                        Participant.session_id == session_id,
+                        Participant.credential_digest == credential_digest,
+                    )
+                )
+                if participant is None:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Invalid participant credentials",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+                participants = session.scalars(
+                    select(Participant)
+                    .where(Participant.session_id == session_id)
+                    .order_by(Participant.created_at, Participant.id)
+                ).all()
+                response = LobbySnapshot(
+                    id=game.id,
+                    name=game.name,
+                    status=game.status,
+                    participants=[
+                        LobbyParticipant.model_validate(item) for item in participants
+                    ],
+                )
+            return response
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, ValueError):
+        raise HTTPException(
+            status_code=503, detail="Lobby lookup unavailable"
         ) from None

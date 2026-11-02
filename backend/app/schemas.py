@@ -59,3 +59,17 @@ class ParticipantIdentity(BaseModel):
     id: UUID
     display_name: str
     created_at: datetime
+
+
+class LobbyParticipant(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    display_name: str
+
+
+class LobbySnapshot(BaseModel):
+    id: UUID
+    name: str
+    status: str
+    participants: list[LobbyParticipant]
