@@ -23,6 +23,8 @@ from app.auth import login_token, require_admin
 from app.database import create_database_engine, transaction
 from app.models import GameSession, Participant
 from app.schemas import (
+    CaptainAssign,
+    CaptainAssigned,
     LobbyParticipant,
     LobbySnapshot,
     LoginRequest,
@@ -358,6 +360,51 @@ async def start_preparation(request: Request, session_id: UUID) -> SessionCreate
     response = await run_in_threadpool(_start_preparation, session_id)
     await request.app.state.lobby_hub.publish(session_id)
     return response
+
+
+@app.put(
+    "/sessions/{session_id}/preparation/captain",
+    response_model=CaptainAssigned,
+    dependencies=[Depends(require_admin)],
+)
+def assign_captain(session_id: UUID, payload: CaptainAssign) -> CaptainAssigned:
+    """Assign a joined participant while the session is in preparation."""
+    try:
+        engine = create_database_engine()
+        try:
+            with transaction(engine) as session:
+                game = session.scalar(
+                    select(GameSession)
+                    .where(GameSession.id == session_id)
+                    .with_for_update()
+                )
+                if game is None:
+                    raise HTTPException(status_code=404, detail="Session not found")
+                if game.status != "preparation":
+                    raise HTTPException(
+                        status_code=409, detail="Session is not in preparation"
+                    )
+                participant_id = session.scalar(
+                    select(Participant.id).where(
+                        Participant.session_id == session_id,
+                        Participant.id == payload.participant_id,
+                    )
+                )
+                if participant_id is None:
+                    raise HTTPException(status_code=404, detail="Participant not found")
+                if game.captain_participant_id != participant_id:
+                    game.captain_participant_id = participant_id
+                response = CaptainAssigned(
+                    session_id=game.id,
+                    captain_participant_id=participant_id,
+                )
+            return response
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, ValueError):
+        raise HTTPException(
+            status_code=503, detail="Captain assignment unavailable"
+        ) from None
 
 
 def _join_participant(session_id: UUID, payload: ParticipantJoin) -> ParticipantJoined:

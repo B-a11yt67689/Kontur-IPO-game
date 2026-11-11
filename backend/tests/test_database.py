@@ -1,13 +1,16 @@
 """Real PostgreSQL persistence and schema tests."""
 
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
+from alembic import command
 from app.database import create_database_engine, transaction
-from app.models import GameSession
+from app.models import GameSession, Participant
 
 
 def test_migration_schema(migrated_database: str) -> None:
@@ -19,8 +22,16 @@ def test_migration_schema(migrated_database: str) -> None:
                 column["name"]: column
                 for column in inspector.get_columns("game_sessions")
             }
-            assert set(columns) == {"id", "name", "status", "created_at"}
-            assert all(not column["nullable"] for column in columns.values())
+            assert set(columns) == {
+                "id",
+                "name",
+                "status",
+                "created_at",
+                "captain_participant_id",
+            }
+            assert {name for name, column in columns.items() if column["nullable"]} == {
+                "captain_participant_id"
+            }
             assert columns["created_at"]["type"].timezone
             assert inspector.get_pk_constraint("game_sessions")[
                 "constrained_columns"
@@ -45,9 +56,10 @@ def test_migration_schema(migrated_database: str) -> None:
                 inspector.get_foreign_keys("participants")[0]["referred_table"]
                 == "game_sessions"
             )
-            assert connection.scalar(
-                text("SELECT version_num FROM alembic_version")
-            ) == ("0003_participants")
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0004_session_captain"
+            )
     finally:
         engine.dispose()
 
@@ -60,7 +72,7 @@ def test_committed_session_survives_new_connection(migrated_database: str) -> No
             second = GameSession(name="Команда IPO")
             session.add_all([first, second])
             session.flush()
-            expected = (first.id, first.name, first.status, first.created_at)
+            expected = (first.id, first.name, first.status, first.created_at, None)
             assert isinstance(first.id, UUID)
             assert first.id != second.id
             assert first.status == "lobby"
@@ -158,12 +170,6 @@ def test_database_rejects_long_name(migrated_database: str, name: str) -> None:
 
 
 def test_length_migration_preserves_existing_long_name(migrated_database: str) -> None:
-    from pathlib import Path
-
-    from alembic.config import Config
-
-    from alembic import command
-
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     engine = create_database_engine(migrated_database)
     identifier = uuid4()
@@ -195,3 +201,113 @@ def test_length_migration_preserves_existing_long_name(migrated_database: str) -
             command.upgrade(config, "head")
         finally:
             engine.dispose()
+
+
+def test_captain_migration_preserves_legacy_session_and_participant(
+    migrated_database: str,
+) -> None:
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    engine = create_database_engine(migrated_database)
+    session_id, participant_id = uuid4(), uuid4()
+    try:
+        command.downgrade(config, "0003_participants")
+        with engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.insert().values(
+                    id=session_id, name="legacy", status="preparation"
+                )
+            )
+            connection.execute(
+                Participant.__table__.insert().values(
+                    id=participant_id,
+                    session_id=session_id,
+                    display_name="legacy participant",
+                    credential_digest="a" * 64,
+                )
+            )
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.execute(
+                select(
+                    GameSession.name,
+                    GameSession.status,
+                    GameSession.captain_participant_id,
+                ).where(GameSession.id == session_id)
+            ).one() == ("legacy", "preparation", None)
+            connection.execute(
+                GameSession.__table__.update()
+                .where(GameSession.id == session_id)
+                .values(captain_participant_id=participant_id)
+            )
+
+        command.downgrade(config, "0003_participants")
+        with engine.connect() as connection:
+            columns = inspect(connection).get_columns("game_sessions")
+            assert "captain_participant_id" not in {
+                column["name"] for column in columns
+            }
+            assert connection.execute(
+                select(GameSession.name, GameSession.status).where(
+                    GameSession.id == session_id
+                )
+            ).one() == ("legacy", "preparation")
+            assert connection.execute(
+                select(Participant.session_id, Participant.display_name).where(
+                    Participant.id == participant_id
+                )
+            ).one() == (session_id, "legacy participant")
+    finally:
+        try:
+            command.upgrade(config, "head")
+        finally:
+            engine.dispose()
+
+
+def test_database_rejects_cross_session_captain_and_preserves_session_cascade(
+    migrated_database: str,
+) -> None:
+    engine = create_database_engine(migrated_database)
+    session_id, other_session_id, participant_id = uuid4(), uuid4(), uuid4()
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.insert(),
+                [
+                    {"id": session_id, "name": "owner"},
+                    {"id": other_session_id, "name": "other"},
+                ],
+            )
+            connection.execute(
+                Participant.__table__.insert().values(
+                    id=participant_id,
+                    session_id=session_id,
+                    display_name="captain",
+                    credential_digest="a" * 64,
+                )
+            )
+
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.update()
+                .where(GameSession.id == other_session_id)
+                .values(captain_participant_id=participant_id)
+            )
+
+        with engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.update()
+                .where(GameSession.id == session_id)
+                .values(captain_participant_id=participant_id)
+            )
+        with engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.delete().where(GameSession.id == session_id)
+            )
+            assert (
+                connection.scalar(
+                    select(Participant.id).where(Participant.id == participant_id)
+                )
+                is None
+            )
+    finally:
+        engine.dispose()

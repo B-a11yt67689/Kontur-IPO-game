@@ -3,7 +3,17 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, Uuid, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -16,6 +26,12 @@ class GameSession(Base):
     __table_args__ = (
         CheckConstraint(
             "char_length(name) <= 255", name="ck_game_sessions_name_length"
+        ),
+        ForeignKeyConstraint(
+            ["id", "captain_participant_id"],
+            ["participants.session_id", "participants.id"],
+            name="fk_game_sessions_captain_participant",
+            use_alter=True,
         ),
     )
 
@@ -31,6 +47,7 @@ class GameSession(Base):
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
     )
+    captain_participant_id: Mapped[UUID | None] = mapped_column(Uuid)
 
 
 class Participant(Base):
@@ -44,6 +61,7 @@ class Participant(Base):
             "char_length(credential_digest) = 64",
             name="ck_participants_credential_digest_length",
         ),
+        UniqueConstraint("session_id", "id", name="uq_participants_session_id_id"),
     )
 
     id: Mapped[UUID] = mapped_column(

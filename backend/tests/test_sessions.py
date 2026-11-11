@@ -58,7 +58,7 @@ def test_creation_committed_before_response(
         if row.id == UUID(body["id"])
     ]
     assert len(rows) == 1
-    assert tuple(rows[0]) == (UUID(body["id"]), name, "lobby", created_at)
+    assert tuple(rows[0]) == (UUID(body["id"]), name, "lobby", created_at, None)
 
 
 @pytest.mark.parametrize("name", ["", " \t\n", "\u2003\u00a0", "я" * 256])

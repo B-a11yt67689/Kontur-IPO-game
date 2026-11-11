@@ -38,6 +38,17 @@ class SessionCreated(BaseModel):
     created_at: datetime
 
 
+class CaptainAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    participant_id: UUID
+
+
+class CaptainAssigned(BaseModel):
+    session_id: UUID
+    captain_participant_id: UUID
+
+
 class ParticipantJoin(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
