@@ -31,7 +31,8 @@ python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt
 ```
 
-Прямые зависимости закреплены на версиях, проверенных вместе на Python 3.12.10.
+Версии прямых зависимостей закреплены. WebSocket лобби проверен на Python 3.12.5,
+Uvicorn 0.54.0 и websockets 17.4.
 Starlette 0.52.1 и AnyIO 4.9.0 также закреплены для совместимости TestClient
 с HTTPX 0.28.1 без предупреждений об устаревшем API.
 Для повторной проверки в чистой среде используйте `$venv = ".venv-readme"`
@@ -273,7 +274,7 @@ $identity = Invoke-RestMethod -Method Get `
 ```powershell
 $lobby = Invoke-RestMethod -Method Get `
     -Uri "http://127.0.0.1:8000/sessions/$sessionId/lobby" `
-    -Headers @{ Authorization = "******" }
+    -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
 ```
 
 `GET /sessions/{session_id}/lobby` возвращает ID и имя сессии, её текущий статус,
@@ -283,32 +284,60 @@ $lobby = Invoke-RestMethod -Method Get `
 `401`. Это разовый HTTP-снимок; новый запрос после переподключения получает
 актуальный список.
 
-Для обновлений без повторных HTTP-запросов участник может подключить WebSocket
-`/sessions/{session_id}/lobby/ws`. При соединении сервер сразу отправляет такой
-же снимок, как HTTP endpoint, а после присоединения нового участника рассылает
+## WebSocket лобби
+
+Установите зависимости через `python -m pip install -r requirements.txt`.
+Uvicorn автоматически выбирает установленный `websockets`. Подготовьте БД и
+настройте администратора по разделам [«Локальная PostgreSQL»](#локальная-postgresql)
+и [«Вход администратора»](#вход-администратора), затем запустите из `backend`:
+
+```powershell
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Подключайтесь к `/sessions/{session_id}/lobby/ws`. При соединении сервер отправляет
+такой же снимок, как HTTP endpoint, а после присоединения нового участника рассылает
 обновлённый снимок всем подключённым участникам этой сессии. Переподключение
 также сразу возвращает актуальное состояние. Доступ остаётся ограничен ID
 сессии; неверный или выданный для другой сессии credential отклоняется до
 принятия WebSocket-соединения.
 
-Браузерный `WebSocket` API не позволяет задать `Authorization` header. Поэтому
-передавайте credential как дополнительный WebSocket subprotocol строго в
-формате `ipo-participant.<credential>` (не в URL и не в query string):
+Для авторизации при handshake передайте `Authorization: Bearer <credential>`
+или предложите subprotocol `ipo-participant.<credential>`. С действительным
+credential в subprotocol сервер отвечает `101` без согласованного subprotocol.
+Этот способ проверен Python-клиентом `websockets` в
+[сетевом сценарии](#проверка-через-uvicorn).
 
-```javascript
-const socket = new WebSocket(
-  `ws://127.0.0.1:8000/sessions/${sessionId}/lobby/ws`,
-  [`ipo-participant.${participantCredential}`],
-);
+Встроенный браузерный `WebSocket` не позволяет задать заголовок `Authorization`.
+При предложенном subprotocol браузер отклоняет ответ `101` без заголовка
+`Sec-WebSocket-Protocol`. Поэтому авторизованное подключение через браузерный
+`WebSocket` с текущим контрактом недоступно.
+[Стандарт WHATWG WebSockets, шаг 11.2](https://websockets.spec.whatwg.org/#concept-websocket-establish).
+
+Снимок содержит только ID и отображаемые имена участников, ID, имя и статус сессии.
+Credential и его digest в снимок не включаются. Отключение клиента удаляет его
+из рассылки. Переход в подготовку реализован через API выше. Экономические акты
+и пользовательский интерфейс пока не реализованы.
+
+### Проверка через Uvicorn
+
+Используйте отдельную PostgreSQL БД с именем, оканчивающимся на `_test`, и
+вымышленные учётные данные. Укажите URL этой БД в `TEST_DATABASE_URL` по примеру
+из раздела [«Локальная PostgreSQL»](#локальная-postgresql). В отдельном PowerShell
+из `backend` примените миграции и запустите сетевую проверку:
+
+```powershell
+$env:DATABASE_URL = $env:TEST_DATABASE_URL
+python -m alembic upgrade head
+python smoke_lobby_websocket.py
 ```
 
-Сервер проверяет это значение из handshake, но намеренно не выбирает его как
-согласованный subprotocol и никогда не отправляет credential обратно в
-subprotocol или кадрах. Нативный клиент может вместо этого передать
-`Authorization: Bearer <credential>` в handshake. Payload содержит только ID и
-отображаемое имя участников, ID/имя/статус сессии; credential и его digest в нём
-не включаются. Отключение клиента удаляет его из рассылки. Подготовка и запуск
-игры также не реализованы.
+Клиенту достаточно `requirements.txt`. Скрипт запускает Uvicorn на свободном
+порту `127.0.0.1`, задаёт вымышленные данные администратора и останавливает сервер
+после проверки. Он проверяет `101`, первый снимок, рассылку при входе второго
+участника, переподключение и `403` для чужого или отсутствующего credential.
+Сессии и участники остаются в проверочной БД. Для `pytest` используйте другую
+пустую БД `*_test`.
 
 `python -m pytest tests/test_participants.py` проверяет присоединение,
 восстановление после нового HTTP-клиента, отдельные идентичности при совпадающих

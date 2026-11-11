@@ -1,5 +1,6 @@
 fastapi==0.162.0
 uvicorn==0.54.0
+websockets==17.4
 # TestClient uses HTTPX 0.28 and the AnyIO BlockingPortal alias.
 starlette==0.52.1
 anyio==4.9.0
