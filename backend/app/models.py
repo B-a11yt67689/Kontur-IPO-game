@@ -80,3 +80,26 @@ class Participant(Base):
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
     )
+
+
+class RoleAssignment(Base):
+    __tablename__ = "role_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "role_code IN ('cto', 'cmo', 'people', 'cfo')",
+            name="ck_role_assignments_role_code",
+        ),
+        UniqueConstraint(
+            "session_id", "participant_id", name="uq_role_assignments_participant"
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "participant_id"],
+            ["participants.session_id", "participants.id"],
+            name="fk_role_assignments_participant",
+            ondelete="CASCADE",
+        ),
+    )
+
+    session_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    role_code: Mapped[str] = mapped_column(Text, primary_key=True)
+    participant_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)

@@ -14,14 +14,14 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
-from app.auth import login_token, require_admin
+from app.auth import login_token, require_admin, unauthorized
 from app.database import create_database_engine, transaction
-from app.models import GameSession, Participant
+from app.models import GameSession, Participant, RoleAssignment
 from app.schemas import (
     CaptainAssign,
     CaptainAssigned,
@@ -32,6 +32,9 @@ from app.schemas import (
     ParticipantIdentity,
     ParticipantJoin,
     ParticipantJoined,
+    RoleAssign,
+    RoleAssigned,
+    RoleCode,
     SessionCreate,
     SessionCreated,
 )
@@ -404,6 +407,88 @@ def assign_captain(session_id: UUID, payload: CaptainAssign) -> CaptainAssigned:
     except (SQLAlchemyError, ValueError):
         raise HTTPException(
             status_code=503, detail="Captain assignment unavailable"
+        ) from None
+
+
+@app.put(
+    "/sessions/{session_id}/preparation/roles/{role_code}",
+    response_model=RoleAssigned,
+)
+def assign_role(
+    session_id: UUID,
+    role_code: RoleCode,
+    payload: RoleAssign,
+    credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+) -> RoleAssigned:
+    """Let a joined participant claim their own role during preparation."""
+    if credentials is None:
+        raise unauthorized()
+    credential_digest = hashlib.sha256(
+        credentials.credentials.encode("utf-8")
+    ).hexdigest()
+    try:
+        engine = create_database_engine()
+        try:
+            with transaction(engine) as session:
+                participant_id = session.scalar(
+                    select(Participant.id).where(
+                        Participant.session_id == session_id,
+                        Participant.credential_digest == credential_digest,
+                    )
+                )
+                if participant_id is None:
+                    raise unauthorized()
+                if participant_id != payload.participant_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Participants can only choose their own role",
+                    )
+                # Serialize claims and phase checks on the same session row.
+                status = session.scalar(
+                    select(GameSession.status)
+                    .where(GameSession.id == session_id)
+                    .with_for_update()
+                )
+                if status is None:
+                    raise unauthorized()
+                if status != "preparation":
+                    raise HTTPException(
+                        status_code=409, detail="Session is not in preparation"
+                    )
+                assignment = session.scalar(
+                    select(RoleAssignment).where(
+                        RoleAssignment.session_id == session_id,
+                        or_(
+                            RoleAssignment.role_code == role_code,
+                            RoleAssignment.participant_id == participant_id,
+                        ),
+                    )
+                )
+                if assignment is None:
+                    session.add(
+                        RoleAssignment(
+                            session_id=session_id,
+                            role_code=role_code,
+                            participant_id=participant_id,
+                        )
+                    )
+                elif (
+                    assignment.role_code != role_code
+                    or assignment.participant_id != participant_id
+                ):
+                    raise HTTPException(
+                        status_code=409, detail="Role or participant already assigned"
+                    )
+            return RoleAssigned(
+                session_id=session_id,
+                role_code=role_code,
+                participant_id=participant_id,
+            )
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, ValueError):
+        raise HTTPException(
+            status_code=503, detail="Role assignment unavailable"
         ) from None
 
 

@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from alembic import command
 from app.database import create_database_engine, transaction
-from app.models import GameSession, Participant
+from app.models import GameSession, Participant, RoleAssignment
 
 
 def test_migration_schema(migrated_database: str) -> None:
@@ -58,7 +58,7 @@ def test_migration_schema(migrated_database: str) -> None:
             )
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0004_session_captain"
+                == "0005_role_assignments"
             )
     finally:
         engine.dispose()
@@ -311,3 +311,98 @@ def test_database_rejects_cross_session_captain_and_preserves_session_cascade(
             )
     finally:
         engine.dispose()
+
+
+def test_role_migration_preserves_legacy_data_and_enforces_claim_constraints(
+    migrated_database: str,
+) -> None:
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    engine = create_database_engine(migrated_database)
+    session_id, other_session_id = uuid4(), uuid4()
+    captain_id, teammate_id = uuid4(), uuid4()
+    assignments = RoleAssignment.__table__
+    try:
+        command.downgrade(config, "0004_session_captain")
+        with engine.begin() as connection:
+            connection.execute(
+                GameSession.__table__.insert(),
+                [
+                    {"id": session_id, "name": "legacy team", "status": "preparation"},
+                    {"id": other_session_id, "name": "other team", "status": "lobby"},
+                ],
+            )
+            connection.execute(
+                Participant.__table__.insert(),
+                [
+                    {
+                        "id": participant_id,
+                        "session_id": session_id,
+                        "display_name": display_name,
+                        "credential_digest": digest * 64,
+                    }
+                    for participant_id, display_name, digest in (
+                        (captain_id, "Captain", "a"),
+                        (teammate_id, "Teammate", "b"),
+                    )
+                ],
+            )
+            connection.execute(
+                GameSession.__table__.update()
+                .where(GameSession.id == session_id)
+                .values(captain_participant_id=captain_id)
+            )
+
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.execute(select(assignments)).all() == []
+            assert (
+                connection.scalar(
+                    select(GameSession.captain_participant_id).where(
+                        GameSession.id == session_id
+                    )
+                )
+                == captain_id
+            )
+            connection.execute(
+                assignments.insert().values(
+                    session_id=session_id, role_code="cto", participant_id=captain_id
+                )
+            )
+
+        for claim_session, code, participant, constraint in (
+            (session_id, "ceo", teammate_id, "ck_role_assignments_role_code"),
+            (session_id, "cto", teammate_id, "role_assignments_pkey"),
+            (session_id, "cfo", captain_id, "uq_role_assignments_participant"),
+            (other_session_id, "cfo", teammate_id, "fk_role_assignments_participant"),
+        ):
+            with (
+                pytest.raises(IntegrityError) as rejected,
+                engine.begin() as connection,
+            ):
+                connection.execute(
+                    assignments.insert().values(
+                        session_id=claim_session,
+                        role_code=code,
+                        participant_id=participant,
+                    )
+                )
+            assert rejected.value.orig.diag.constraint_name == constraint
+
+        command.downgrade(config, "0004_session_captain")
+        with engine.connect() as connection:
+            assert not inspect(connection).has_table("role_assignments")
+            assert connection.execute(
+                select(GameSession.status, GameSession.captain_participant_id).where(
+                    GameSession.id == session_id
+                )
+            ).one() == ("preparation", captain_id)
+            assert set(
+                connection.scalars(
+                    select(Participant.id).where(Participant.session_id == session_id)
+                )
+            ) == {captain_id, teammate_id}
+    finally:
+        try:
+            command.upgrade(config, "head")
+        finally:
+            engine.dispose()

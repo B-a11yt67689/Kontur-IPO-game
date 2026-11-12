@@ -1,7 +1,7 @@
 """Validated HTTP payloads for game session creation."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, SecretStr, StringConstraints
@@ -47,6 +47,21 @@ class CaptainAssign(BaseModel):
 class CaptainAssigned(BaseModel):
     session_id: UUID
     captain_participant_id: UUID
+
+
+RoleCode = Literal["cto", "cmo", "people", "cfo"]
+
+
+class RoleAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    participant_id: UUID
+
+
+class RoleAssigned(BaseModel):
+    session_id: UUID
+    role_code: RoleCode
+    participant_id: UUID
 
 
 class ParticipantJoin(BaseModel):
