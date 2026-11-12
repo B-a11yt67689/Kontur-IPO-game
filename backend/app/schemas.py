@@ -99,3 +99,19 @@ class LobbySnapshot(BaseModel):
     name: str
     status: str
     participants: list[LobbyParticipant]
+
+
+class PreparationRoles(BaseModel):
+    cto: UUID | None
+    cmo: UUID | None
+    people: UUID | None
+    cfo: UUID | None
+
+
+class PreparationSnapshot(BaseModel):
+    id: UUID
+    name: str
+    status: Literal["preparation"]
+    participants: list[LobbyParticipant]
+    captain_participant_id: UUID | None
+    roles: PreparationRoles

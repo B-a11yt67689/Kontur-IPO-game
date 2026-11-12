@@ -14,7 +14,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
@@ -32,6 +32,8 @@ from app.schemas import (
     ParticipantIdentity,
     ParticipantJoin,
     ParticipantJoined,
+    PreparationRoles,
+    PreparationSnapshot,
     RoleAssign,
     RoleAssigned,
     RoleCode,
@@ -363,6 +365,86 @@ async def start_preparation(request: Request, session_id: UUID) -> SessionCreate
     response = await run_in_threadpool(_start_preparation, session_id)
     await request.app.state.lobby_hub.publish(session_id)
     return response
+
+
+@app.get("/sessions/{session_id}/preparation", response_model=PreparationSnapshot)
+def get_preparation(
+    session_id: UUID,
+    credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+) -> PreparationSnapshot:
+    """Read the session, roster and assignments from one PostgreSQL snapshot."""
+    if credentials is None:
+        raise unauthorized()
+    credential_digest = hashlib.sha256(
+        credentials.credentials.encode("utf-8")
+    ).hexdigest()
+    is_member = (
+        select(Participant.id)
+        .where(
+            Participant.session_id == GameSession.id,
+            Participant.credential_digest == credential_digest,
+        )
+        .correlate(GameSession)
+        .exists()
+    )
+    # One SELECT gives the authorization check and all returned data one snapshot.
+    statement = (
+        select(
+            GameSession.id.label("session_id"),
+            GameSession.name,
+            GameSession.status,
+            GameSession.captain_participant_id,
+            Participant.id.label("participant_id"),
+            Participant.display_name,
+            RoleAssignment.role_code,
+        )
+        .join(Participant, Participant.session_id == GameSession.id)
+        .outerjoin(
+            RoleAssignment,
+            and_(
+                RoleAssignment.session_id == Participant.session_id,
+                RoleAssignment.participant_id == Participant.id,
+            ),
+        )
+        .where(GameSession.id == session_id, is_member)
+        .order_by(Participant.created_at, Participant.id)
+    )
+    try:
+        engine = create_database_engine()
+        try:
+            with transaction(engine) as session:
+                rows = session.execute(statement).all()
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, ValueError):
+        raise HTTPException(
+            status_code=503, detail="Preparation lookup unavailable"
+        ) from None
+
+    if not rows:
+        raise unauthorized()
+    game = rows[0]
+    if game.status != "preparation":
+        raise HTTPException(status_code=409, detail="Session is not in preparation")
+    role_owners = {
+        row.role_code: row.participant_id for row in rows if row.role_code is not None
+    }
+    return PreparationSnapshot(
+        id=game.session_id,
+        name=game.name,
+        status=game.status,
+        participants=[
+            LobbyParticipant(id=row.participant_id, display_name=row.display_name)
+            for row in rows
+        ],
+        captain_participant_id=game.captain_participant_id,
+        roles=PreparationRoles(
+            cto=role_owners.get("cto"),
+            cmo=role_owners.get("cmo"),
+            people=role_owners.get("people"),
+            cfo=role_owners.get("cfo"),
+        ),
+    )
 
 
 @app.put(
