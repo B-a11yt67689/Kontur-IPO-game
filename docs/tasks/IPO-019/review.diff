@@ -1,0 +1,2347 @@
+IPO-019: complete working-copy change packet
+Base snapshot: acb96a18d7b698a72f99a40e7d864cb05d42009d88677605edb33de58ffcfdc9
+Head snapshot: a8576ce821e2fb17c46d049835a7f793bc080ee3fc43f18a83d6117bfa80f081
+Changed files: 7
+
+SHA-256:
+{
+  "backend/README.md": "b7ff363784f4574efa4b2710cf2b5c7751ff6bbda5cf11ba679e6eca8c04745e",
+  "backend/app/act_one.py": "2a37d0adae91ed7b25c66cff2da0927a61cd91eb3ce7015c5b1cfa6da566d05b",
+  "backend/app/act_one_api.py": "1dc81c9e732e7da22b6558df0ee5023deaf7b0b0f5400b6908933fe980b96901",
+  "backend/app/act_one_schemas.py": "859aef787c1a14b073ccee1a1aea1733d0be462d5acbe697d799e34125cf405b",
+  "backend/app/main.py": "3a09dda22fc55d0fe540ff25867de57eac589558029956ec1157ae76ecf71ccd",
+  "backend/tests/test_act_one_pnl.py": "51eb69b1b8bb319262b8f55e45ea26c8a9b779468b918361312b70fd142cb4be",
+  "docs/tasks/IPO-019/report.md": "ceb809e7716b4017d3b21c7848ca622322cbcca9c5aecaba901dbb366147e5b0"
+}
+
+Full-context diff:
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -1,519 +1,561 @@
+ # IPO backend
+ 
+ HTTP-сервис и постоянное хранение игровых сессий в PostgreSQL через SQLAlchemy,
+ psycopg и Alembic. `/health` подтверждает только ответ HTTP-процесса.
+ 
+ Проверено в Windows PowerShell на Python 3.12.10. Нужен установленный Python 3.12.
+ Команды ниже выполняются из папки `backend`.
+ 
+ ## Окружение и зависимости
+ 
+ В примере указан проверенный путь Python из Microsoft Store. Если Python 3.12
+ установлен иначе, задайте в `$python312` полный путь к своему `python.exe`.
+ 
+ ```powershell
+ $python312 = "$env:LOCALAPPDATA\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\python.exe"
+ & $python312 --version
+ $venv = ".venv"
+ & $python312 -m venv $venv
+ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+ & "$venv\Scripts\Activate.ps1"
+ python --version
+ python -m pip install -r requirements.txt
+ ```
+ 
+ Политика RemoteSigned применяется только к текущему процессу PowerShell и позволяет
+ активировать локально созданную среду. После закрытия окна она не сохраняется.
+ 
+ Для разработки дополнительно установите тесты и Ruff:
+ 
+ ```powershell
+ python -m pip install -r requirements-dev.txt
+ ```
+ 
+ Версии прямых зависимостей закреплены. WebSocket лобби проверен на Python 3.12.5,
+ Uvicorn 0.54.0 и websockets 17.4.
+ Starlette 0.52.1 и AnyIO 4.9.0 также закреплены для совместимости TestClient
+ с HTTPX 0.28.1 без предупреждений об устаревшем API.
+ Для повторной проверки в чистой среде используйте `$venv = ".venv-readme"`
+ вместо `.venv` в блоке создания окружения, затем выполните остальные команды.
+ 
+ ## Запуск
+ 
+ В терминале с активированным окружением:
+ 
+ ```powershell
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ Во втором окне PowerShell:
+ 
+ ```powershell
+ $response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health
+ $response.StatusCode
+ $response.Headers['Content-Type']
+ $response.Content
+ ```
+ 
+ Ожидается `200`, `application/json` и ровно `{"status":"ok"}`.
+ Повторный запрос возвращает тот же ответ. Аккаунт, БД и секретные переменные
+ не требуются. Остановка сервера: `Ctrl+C`.
+ 
+ ## Проверки
+ 
+ Из `backend` с активированным окружением:
+ 
+ Перед полным запуском подготовьте отдельную пустую тестовую БД и задайте
+ `TEST_DATABASE_URL` по инструкции ниже. Отсутствующая настройка приводит к ошибке
+ интеграционных тестов, а не к их пропуску.
+ 
+ ```powershell
+ python -m pytest
+ python -m ruff check .
+ python -m ruff format --check .
+ ```
+ 
+ `tests/test_end_to_end_scenario.py` проверяет полный сценарий IPO-009 на настоящей
+ PostgreSQL: администратор создаёт две сессии, несколько независимых HTTP/WebSocket
+ клиентов присоединяются, после обновления клиента личность восстанавливается по
+ сохранённому credential, затем администратор запускает подготовку. Проверяются
+ снимки и обновления WebSocket, сохранённый статус и участники, а также изоляция
+ сессий и credential. Репозиторий не содержит frontend, поэтому эти автоматические
+ HTTP/WebSocket-клиенты моделируют отдельные браузеры; проверка настоящего браузерного
+ интерфейса не выполняется. Отдельный запуск из `backend`:
+ 
+ ```powershell
+ python -m pytest tests/test_end_to_end_scenario.py
+ ```
+ 
+ Успешный результат — `1 passed`, HTTP `201` при создании/входе, идентичность
+ с прежним ID после «обновления», снимки и обновления WebSocket с ID только своей
+ сессии при запуске подготовки в обеих сессиях, а также соответствующие участники
+ и статусы в PostgreSQL. Полный `python -m pytest` дополнительно выполняет остальные
+ backend-тесты.
+ 
+ Выход из окружения: `deactivate`.
+ 
+ ## Локальная PostgreSQL
+ 
+ Нужен PostgreSQL 13+ (`gen_random_uuid()` доступна без расширений). Проверено на
+ Windows, PostgreSQL 18.3 и Python 3.12.10. Docker не требуется. Установите PostgreSQL
+ с официального сайта, если его ещё нет. Следующий пример создаёт **новый** локальный
+ кластер; не указывайте каталог существующего кластера. Команды из `backend`:
+ 
+ ```powershell
+ $pgBin = 'C:\Program Files\PostgreSQL\18\bin'
+ $pgData = Join-Path $env:LOCALAPPDATA 'ipo-local-postgres'
+ if (Test-Path $pgData) { throw 'Выберите новый каталог для кластера' }
+ & "$pgBin\initdb.exe" -D $pgData -U ipo -A scram-sha-256 --pwprompt --encoding=UTF8 --locale=C
+ & "$pgBin\pg_ctl.exe" -D $pgData -l "$pgData\server.log" -o '-h 127.0.0.1 -p 55432' -w start
+ & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55432 -U ipo -W ipo
+ & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55432 -U ipo -W ipo_test
+ ```
+ 
+ `--pwprompt` задаёт пароль интерактивно, `-W` запрашивает его для создания БД.
+ Если порт занят, выберите свободный и измените его во всех командах и URL.
+ При наличии своей PostgreSQL достаточно создать две отдельные базы с правами
+ на создание таблиц; настройку существующих служб менять не нужно.
+ 
+ `.env.example` содержит только вымышленные настройки. Файлы `.env` автоматически
+ не загружаются. Задайте переменные в текущем PowerShell. Следующий вариант запрашивает
+ пароль без отображения и кодирует специальные символы для URL:
+ 
+ ```powershell
+ $credential = Get-Credential -UserName ipo -Message 'Пароль локальной PostgreSQL'
+ $dbPassword = [Uri]::EscapeDataString($credential.GetNetworkCredential().Password)
+ $env:DATABASE_URL = "postgresql+psycopg://ipo:${dbPassword}@127.0.0.1:55432/ipo"
+ $env:TEST_DATABASE_URL = "postgresql+psycopg://ipo:${dbPassword}@127.0.0.1:55432/ipo_test"
+ Remove-Variable dbPassword, credential
+ python -m alembic upgrade head
+ python -m alembic upgrade head
+ python -m pytest
+ python -m ruff check .
+ python -m ruff format --check .
+ ```
+ 
+ Не выводите переменные с URL и не сохраняйте настоящие пароли в коде или Git.
+ Миграции читают `DATABASE_URL`. Приложение не создаёт таблицы при запуске.
+ Alembic можно откатить командой `python -m alembic downgrade base`; она удаляет
+ `game_sessions` вместе с её данными, поэтому используйте её только намеренно.
+ 
+ Тесты читают **только явно заданную** `TEST_DATABASE_URL`; имя базы должно
+ заканчиваться на `_test`, база должна отличаться от `DATABASE_URL`, её схема `public`
+ должна быть пустой. Тесты откажутся менять непустую схему. Они применяют миграцию
+ дважды, создают данные и в конце удаляют только созданные ими таблицы откатом
+ миграции и удалением `alembic_version`. Используйте выделенную БД без других
+ пользователей/параллельных запусков. После аварийного прерывания проверьте остатки
+ вручную или создайте новую пустую тестовую БД; автоматического сброса чужих данных нет.
+ Только HTTP-проверку можно выполнить без БД: `python -m pytest tests/test_health.py`.
+ 
+ Остановка созданного кластера (из того же окна PowerShell):
+ 
+ ```powershell
+ & "$pgBin\pg_ctl.exe" -D $pgData -m fast -w stop
+ ```
+ 
+ ## Использование хранения и ограничения модели
+ 
+ `create_database_engine()` из `app.database` читает `DATABASE_URL` при вызове,
+ не при импорте HTTP-приложения. Владелец engine освобождает пул через `dispose()`.
+ `with transaction(engine) as session:` открывает ORM-сессию, фиксирует успешную
+ операцию, откатывает исключение и закрывает сессию. Внутри можно вызвать
+ `session.add(GameSession(name="Команда"))` из `app.models`.
+ 
+ Одна сессия соответствует одной команде. PostgreSQL генерирует UUID и время
+ `TIMESTAMP WITH TIME ZONE`; обязательность всех полей и уникальность UUID
+ защищены БД. Названия могут повторяться. CHECK-ограничение `ck_game_sessions_name_length`
+ ограничивает текстовое поле 255 символами; API дополнительно удаляет пробелы
+ по краям и отклоняет пустое название. Миграция `0002_session_name_length`
+ проверяет существующие данные и откажется применяться при названиях длиннее 255;
+ она не обрезает и не удаляет их. Такие данные нужно согласованно исправить
+ перед повторным применением миграции.
+ Статус хранится текстом с начальным значением `lobby`; администратор может
+ перевести сессию в `preparation` через API. Ограничение на набор статусов
+ в БД не вводится.
+ Участники хранятся отдельно в `participants` и связаны с сессией через внешний ключ.
+ Миграция `0003_participants` добавляет эту таблицу; отображаемые имена не уникальны.
+ 
+ Документация: [SQLAlchemy + psycopg](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg),
+ [Alembic](https://alembic.sqlalchemy.org/en/latest/tutorial.html).
+ 
+ 
+ ## Создание сессии через API
+ 
+ Endpoint требует Bearer-токен администратора. Перед запросом задайте `DATABASE_URL` и примените
+ `python -m alembic upgrade head`, как описано выше. Затем запустите сервер.
+ В этом же окне сначала настройте администратора по следующему разделу.
+ 
+ ```powershell
+ $body = @{ name = '  Команда 1  ' } | ConvertTo-Json
+ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/sessions `
+     -Headers @{ Authorization = "Bearer $($login.access_token)" } `
+     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ ```
+ 
+ Ожидается `201 Created` и JSON с `id` (UUID), `name` (`Команда 1`),
+ `status` (`lobby`) и `created_at` (ISO 8601 с часовым поясом). Допустимо
+ 1–255 символов после удаления пробельных символов по краям. Одинаковые названия
+ создают разные UUID. Пустое, слишком длинное или отсутствующее название,
+ нестроковое значение и дополнительные поля (в том числе `id`, `status`,
+ `created_at`) возвращают `422` без записи.
+ 
+ Ответ создаётся из серверных defaults после `flush` и возвращается только после
+ успешного commit. При ошибке подключения, записи или commit возвращается `503`
+ с `{"detail":"Session creation unavailable"}` без SQL, DSN и traceback.
+ ORM-сессия закрывается, engine освобождается после каждого запроса.
+ `/health` продолжает работать независимо от настройки и доступности БД.
+ 
+ `python -m pytest tests/test_sessions.py` проверяет API на настоящей выделенной
+ PostgreSQL с теми же требованиями к `TEST_DATABASE_URL`, что и полный набор.
+ В том числе тесты читают запись через новый engine после ответа, вызывают
+ реальную ошибку записи и отложенную до commit ошибку PostgreSQL и проверяют откат.
+ 
+ ## Начало подготовки сессии
+ 
+ Только администратор с действующим Bearer-токеном может начать подготовку:
+ 
+ ```powershell
+ Invoke-RestMethod -Method Post `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/preparation/start" `
+     -Headers @{ Authorization = "Bearer $($login.access_token)" }
+ ```
+ 
+ Для статуса `lobby` endpoint возвращает `200` и состояние сессии со статусом
+ `preparation`. Подписанные WebSocket-клиенты получают обновлённый снимок лобби;
+ HTTP-снимок лобби также показывает новый статус. Повторный запрос возвращает
+ тот же текущий статус без повторного изменения; он также повторно публикует
+ актуальный снимок, чтобы восстановить уведомление после временной ошибки.
+ Подписчики могут получить тот же снимок повторно. Неизвестный UUID возвращает
+ `404`, неверная или отсутствующая авторизация — `401`. Параллельные запросы
+ сериализуются блокировкой строки в PostgreSQL.
+ 
+ ## Снимок подготовки
+ 
+ `GET /sessions/{session_id}/preparation` требует `Authorization: Bearer <participant_credential>`
+ участника указанной сессии. При статусе `preparation` ответ `200` содержит `id` (UUID),
+ `name`, `status` (`preparation`), `participants` (список объектов с `id` и
+ `display_name` в порядке присоединения), `captain_participant_id` (UUID или `null`)
+ и объект `roles` с четырьмя обязательными полями `cto`, `cmo`, `people`, `cfo`.
+ Каждое поле роли содержит UUID её владельца или `null`. ID капитана и владельцев
+ ролей ссылаются на записи из `participants` этого же снимка. При повторном подключении
+ запрос с сохранённым credential возвращает актуальные сохранённые назначения.
+ 
+ Отсутствующий, недействительный или выданный для другой сессии credential даёт
+ `401` с `WWW-Authenticate: Bearer`. Для неизвестного UUID сессии ответ также `401`.
+ С действующим credential своей сессии запрос на любом этапе, кроме `preparation`,
+ включая `lobby`, даёт `409` с `{"detail":"Session is not in preparation"}`.
+ 
+ ## Вход участника в сессию
+ 
+ Участник присоединяется по UUID приглашённой сессии; отдельный публичный список
+ сессий и дополнительные права для участника в этом API не вводятся. Имя является
+ только отображаемой подписью: совпадающие имена создают разные записи с разными
+ ID и учётными данными и не дают доступа к чужой записи.
+ 
+ ```powershell
+ $sessionId = 'UUID сессии из приглашения'
+ $body = @{ display_name = 'Аналитик' } | ConvertTo-Json
+ $participant = Invoke-RestMethod -Method Post `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants" `
+     -ContentType 'application/json; charset=utf-8' `
+     -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ # Не выводите participant_credential; сохраните его на клиенте для восстановления.
+ ```
+ 
+ `POST /sessions/{session_id}/participants` принимает `display_name` длиной
+ 1–255 символов после обрезки пробелов и возвращает `201` с `id`,
+ `display_name`, случайным `participant_credential` и `token_type="bearer"`.
+ Секрет показывается только при присоединении. Сервер хранит только SHA-256 digest
+ случайного токена, не сам bearer credential. Клиенту необходимо сохранить его
+ в собственном защищённом хранилище, чтобы восстановить личность после обновления
+ страницы или переподключения.
+ 
+ Для восстановления клиент передаёт этот credential как Bearer-токен:
+ 
+ ```powershell
+ $identity = Invoke-RestMethod -Method Get `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants/me" `
+     -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+ ```
+ 
+ `GET /sessions/{session_id}/participants/me` возвращает ID, отображаемое имя и
+ время создания; credential в этом ответе отсутствует. Неверный, отсутствующий
+ или относящийся к другой сессии credential даёт `401`; неизвестная сессия при
+ присоединении даёт `404`. Невалидное имя даёт `422`, недоступность БД —
+ санитизированный `503`. Идентичность определяется только случайным credential,
+ а не именем.
+ 
+ Авторизованный участник получает актуальный снимок лобби обычным HTTP-запросом:
+ 
+ ```powershell
+ $lobby = Invoke-RestMethod -Method Get `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/lobby" `
+     -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+ ```
+ 
+ `GET /sessions/{session_id}/lobby` возвращает ID и имя сессии, её текущий статус,
+ а также ID и отображаемое имя всех её участников. Credential нужен в Bearer
+ заголовке, но credential и его digest в ответ не включаются. Неизвестная сессия
+ даёт `404`; отсутствующий, неверный или относящийся к другой сессии credential —
+ `401`. Это разовый HTTP-снимок; новый запрос после переподключения получает
+ актуальный список.
+ 
+ ## WebSocket лобби
+ 
+ Установите зависимости через `python -m pip install -r requirements.txt`.
+ Uvicorn автоматически выбирает установленный `websockets`. Подготовьте БД и
+ настройте администратора по разделам [«Локальная PostgreSQL»](#локальная-postgresql)
+ и [«Вход администратора»](#вход-администратора), затем запустите из `backend`:
+ 
+ ```powershell
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ Подключайтесь к `/sessions/{session_id}/lobby/ws`. При соединении сервер отправляет
+ такой же снимок, как HTTP endpoint, а после присоединения нового участника рассылает
+ обновлённый снимок всем подключённым участникам этой сессии. Переподключение
+ также сразу возвращает актуальное состояние. Доступ остаётся ограничен ID
+ сессии; неверный или выданный для другой сессии credential отклоняется до
+ принятия WebSocket-соединения.
+ 
+ Для авторизации при handshake передайте `Authorization: Bearer <credential>`
+ или предложите subprotocol `ipo-participant.<credential>`. С действительным
+ credential в subprotocol сервер отвечает `101` без согласованного subprotocol.
+ Этот способ проверен Python-клиентом `websockets` в
+ [сетевом сценарии](#проверка-через-uvicorn).
+ 
+ Встроенный браузерный `WebSocket` не позволяет задать заголовок `Authorization`.
+ При предложенном subprotocol браузер отклоняет ответ `101` без заголовка
+ `Sec-WebSocket-Protocol`. Поэтому авторизованное подключение через браузерный
+ `WebSocket` с текущим контрактом недоступно.
+ [Стандарт WHATWG WebSockets, шаг 11.2](https://websockets.spec.whatwg.org/#concept-websocket-establish).
+ 
+ Снимок содержит только ID и отображаемые имена участников, ID, имя и статус сессии.
+ Credential и его digest в снимок не включаются. Отключение клиента удаляет его
+ из рассылки. Переход в подготовку реализован через API выше. Экономические акты
+ и пользовательский интерфейс пока не реализованы.
+ 
+ ### Проверка через Uvicorn
+ 
+ Используйте отдельную PostgreSQL БД с именем, оканчивающимся на `_test`, и
+ вымышленные учётные данные. Укажите URL этой БД в `TEST_DATABASE_URL` по примеру
+ из раздела [«Локальная PostgreSQL»](#локальная-postgresql). В отдельном PowerShell
+ из `backend` примените миграции и запустите сетевую проверку:
+ 
+ ```powershell
+ $env:DATABASE_URL = $env:TEST_DATABASE_URL
+ python -m alembic upgrade head
+ python smoke_lobby_websocket.py
+ ```
+ 
+ Клиенту достаточно `requirements.txt`. Скрипт запускает Uvicorn на свободном
+ порту `127.0.0.1`, задаёт вымышленные данные администратора и останавливает сервер
+ после проверки. Он проверяет `101`, первый снимок, рассылку при входе второго
+ участника, переподключение и `403` для чужого или отсутствующего credential.
+ Сессии и участники остаются в проверочной БД. Для `pytest` используйте другую
+ пустую БД `*_test`.
+ 
+ `python -m pytest tests/test_participants.py` проверяет присоединение,
+ восстановление после нового HTTP-клиента, отдельные идентичности при совпадающих
+ именах, изоляцию по сессии, ошибки авторизации и отсутствие исходного credential
+ в PostgreSQL и в снимке лобби. `python -m pytest tests/test_lobby_websocket.py`
+ проверяет WebSocket-снимок и обновления, авторизацию handshake, переподключение,
+ отключение и отсутствие credential/digest в payload.
+ 
+ ## Вход администратора
+ 
+ В предварительной модели есть один администратор из окружения, без таблицы
+ пользователей, регистрации, refresh-токенов и интерфейса входа. Используются
+ PyJWT 2.10.1 и argon2-cffi 25.1.0. Argon2 — рекомендуемый алгоритм в
+ [официальном руководстве FastAPI](https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/).
+ Готовая библиотека Argon2 проверяет хеш; криптография приложения не реализуется.
+ 
+ В окне запуска сервера задайте три переменные. Пароль вводится без отображения,
+ хеш и случайный ключ передаются из дочернего Python в переменные PowerShell
+ без вывода в консоль. Не сохраняйте эти значения в репозитории или истории команд:
+ 
+ ```powershell
+ $env:ADMIN_USERNAME = Read-Host 'Логин администратора'
+ $env:ADMIN_PASSWORD_HASH = python -c "from getpass import getpass; from argon2 import PasswordHasher; p=getpass('Admin password: '); assert p, 'Password must not be empty'; print(PasswordHasher().hash(p))"
+ $env:JWT_SIGNING_KEY = python -c "import secrets; print(secrets.token_urlsafe(48))"
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ `ADMIN_USERNAME` — непустая строка; `ADMIN_PASSWORD_HASH` — корректный Argon2-хеш
+ непустого пароля; `JWT_SIGNING_KEY` — случайный секрет минимум 32 байта UTF-8
+ (проверка длины не доказывает случайность, используйте генератор выше).
+ Переменные читаются при запросе, `.env` автоматически не загружается.
+ При отсутствующей или испорченной настройке вход и защищённый доступ дают `401`.
+ Ключа по умолчанию нет. `/health` не требует этих настроек и не обращается к БД.
+ 
+ Во втором окне выполните JSON-вход, затем команду создания сессии выше:
+ 
+ ```powershell
+ $credential = Get-Credential -Message 'Администратор IPO'
+ $body = @{ username = $credential.UserName; password = $credential.GetNetworkCredential().Password } | ConvertTo-Json
+ $login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/auth/login `
+     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ Remove-Variable body, credential
+ # Не выводите access_token: используйте $login в Authorization при создании сессии.
+ ```
+ 
+ Успех входа: `200` с `access_token`, `token_type="bearer"`, `expires_in=1800`.
+ JWT содержит только логин в `sub` и срок в `exp`; содержимое JWT доступно читателю
+ токена, пароль и хеш туда не включаются. Подпись HS256 фиксирована сервером;
+ `sub` и `exp` обязательны, `sub` должен совпадать с настроенным администратором.
+ Неверный логин или пароль дают одинаковый `401 {"detail":"Invalid credentials"}`.
+ Некорректное тело входа даёт `422 {"detail":"Invalid login request"}` без отражения
+ введённых данных. Отсутствующий, просроченный, подменённый или некорректный Bearer
+ даёт `401` до обращения к БД и создания записи. После истечения 30 минут войдите
+ повторно. Смена ключа аннулирует прежние токены; смена пароля сама по себе их
+ не отзывает. Индивидуальный отзыв, rate limiting и аудит входов пока не реализованы.
+ Для доступа вне loopback требуется HTTPS на уровне развёртывания.
+ 
+ `python -m pytest tests/test_auth.py` проверяет вход, JWT, безопасные ошибки
+ и отказы с проверкой отсутствия записи на выделенной PostgreSQL. Полный набор
+ сохраняет прежние проверки IPO-001–003 и использует настоящий вход для API-тестов.
+ 
+ ## Расчёт P&L
+ 
+ `app.pnl.calculate_act_pnl(PnlInputs(...))` — чистый расчёт одного акта без обращения
+ к БД. Неизменяемый `PnlInputs` принимает `act_number` (целое 1–7), `clients`
+ (целое от нуля), а также `average_price`, `orders_per_client`,
+ `advertising_budget`, `marketing_payroll`, `development_payroll`,
+ `support_payroll`, `balance_at_start` как конечные `Decimal`. Все значения,
+ кроме начального баланса, должны быть неотрицательными. `bool` в целочисленных
+ полях, `float` и другие типы вместо `Decimal` отклоняются с `TypeError`;
+ недопустимые значения — с `ValueError`.
+ 
+ `PnlResult` содержит `arpc`, `gross_revenue`, `total_cogs`, `operating_costs`,
+ `result`, `balance_after_result`, а также серверные константы `unit_cogs` и
+ `business_costs`. Константы актов 1–7 взяты из строк 8 и 14 листа `8 PnL`:
+ `1; 1.1; 1.2; 1.3; 1.35; 1.4; 1.45` и `30; 45; 60; 80; 100; 120; 140`.
+ ARPC равен цене, умноженной на покупки на клиента; выручка — ARPC, умноженному
+ на клиентов; CoGS — покупкам на клиента, умноженным на клиентов и себестоимость
+ заказа. Operating Costs складывает три ФОТ и расходы на бизнес. Из выручки
+ вычитаются CoGS, реклама (ровно один раз) и Operating Costs. Финансовый результат
+ прибавляется к начальному балансу; отрицательные результат и баланс допустимы.
+ 
+ Вычисления используют Decimal без преобразования во float и без округления
+ до копеек; действует текущий контекст Decimal. Число клиентов и расходы передаются
+ готовыми: расчёт клиентской базы, ФОТ, кредитов и условия банкротства эта функция
+ не определяет. Например, входы Excel для первого акта дают ARPC `2.47`, выручку
+ `103.74`, CoGS `54.60`, Operating Costs `190`, результат `-140.86` и остаток
+ `534.14` при начальном балансе `675`.
+ 
+ Проверка без БД из `backend`: `python -m pytest tests/test_pnl.py`.
+ 
+ ## Запуск первого акта
+ 
+ `POST /sessions/{session_id}/acts/1/start` требует Bearer администратора.
+ Отправьте запрос без тела, с `{}` или `null`. Любые поля тела, включая
+ `roll`, `balance` и `action_points`, дают `422`.
+ 
+ Первый запуск доступен в `preparation`, когда назначены капитан и все четыре
+ роли `cto`, `cmo`, `people`, `cfo`. Сервер сохраняет один бросок d10, состояние
+ акта и статус `act_one` в общей транзакции. При старте доступны 675.00 денег,
+ 60 клиентов, 130 очков действий, две junior-команды, уровень найма 0,
+ вместимость 2 и три эксперимента на команду. Бонус 1 добавляет 10 очков действий,
+ бонус 9 — 10 клиентов. Остальные восемь бонусов сохраняются как доступное
+ одноразовое право; их активация пока не реализована.
+ 
+ Успех — `200` со снимком: `session_id`, `act_number=1`, `status="act_one"`,
+ `started_at` с часовым поясом, `balance` строкой Decimal, `clients`,
+ `action_points`, `hiring_level`, `hiring_capacity`,
+ `hired_development_team_grades`, `experiments_per_development_team` и
+ `starting_bonus {roll, code, description, available}`. Для бонусов 1 и 9
+ `available=false`. Credential и digest в ответ не включаются.
+ 
+ Повторный и параллельный запрос возвращает текущие сохранённые значения,
+ включая последующие покупки, без нового броска или начисления ресурсов.
+ Неизвестная сессия даёт `404`, неподходящая фаза, неготовая команда либо
+ отсутствующее состояние при статусе `act_one` — `409`. Неавторизованный запрос
+ получает `401` до доступа к БД. Сбой подключения, записи или commit даёт
+ санитизированный `503` с откатом всей транзакции.
+ 
+ После commit сервер публикует актуальный статус в WebSocket лобби. Ошибка
+ публикации сохраняет успешный HTTP-результат; повтор может обновить лобби.
+ Рассылка работает в одном процессе приложения. Миграция
+ `0006_act_one_states` добавляет отдельную таблицу состояния с каскадом при
+ удалении сессии. Проверки: `python -m pytest tests/test_act_one_start.py` на
+ выделенной PostgreSQL по инструкции выше.
+ 
+ ## Получение снимка первого акта
+ 
+ `GET /sessions/{session_id}/acts/1` возвращает тот же `ActOneSnapshot` с
+ текущими сохранёнными ресурсами, бонусом и покупками. Передайте Bearer credential
+ участника этой сессии; роль не обязательна. Администраторский JWT не заменяет
+ credential участника. Снимок доступен после повторного подключения и не меняет
+ состояние, не бросает кубик и не начисляет ресурсы.
+ 
+ Без/неверный/чужой credential и неизвестная сессия дают одинаковый
+ `401` с `WWW-Authenticate: Bearer`. Только участник своей сессии получает `409`
+ до первого акта, после него или при отсутствии сохранённого состояния.
+ Авторизация, фаза и состояние читаются одним согласованным SELECT.
+ Ошибки БД возвращают санитизированный `503`. Проверка на выделенной PostgreSQL:
+ `python -m pytest tests/test_act_one_snapshot.py`.
+ 
+ ## Первая покупка стратегии найма
+ 
+ `POST /sessions/{session_id}/acts/1/hiring/upgrade` доступен участнику своей
+ сессии с ролью `people` по participant Bearer. Капитан, другие роли и
+ администраторский JWT сами по себе это право не дают. Тело отсутствует,
+ `null` или `{}`; клиентские поля, включая цену и уровень, возвращают `422`.
+ 
+ В `act_one` первая покупка стоит ровно 30 очков действий, повышает уровень
+ найма 0→1 и вместимость 2→3. Фактический состав остаётся две junior-команды;
+ деньги, клиенты, эксперименты и стартовый бонус сохраняются. Повторные и
+ параллельные запросы возвращают текущий снимок `ActOneSnapshot` с `200` и не
+ списывают очки повторно, в том числе когда после покупки осталось меньше 30 AP.
+ Повторный start и новое подключение также возвращают сохранённую покупку.
+ 
+ Без/неверный/чужой credential и неизвестная сессия дают одинаковый `401` с
+ `WWW-Authenticate: Bearer`; свой участник без `people` получает `403`.
+ Авторизация и роль проверяются до фазы. Неактивный первый акт, отсутствие
+ состояния или недостаток очков до первой покупки дают `409` без изменений.
+ Строковая блокировка сессии сериализует покупку с запуском акта; состояние
+ читается после получения блокировки. Ошибки записи/commit возвращают
+ санитизированный `503` с полным откатом. Проверки на выделенной PostgreSQL:
+ `python -m pytest tests/test_act_one_hiring.py`.
++
++## Предпросмотр P&L первого акта
++
++`POST /sessions/{session_id}/acts/1/pnl/preview` доступен участнику своей
++сессии с ролью `cfo` по participant Bearer. Запрос вычисляет P&L по готовым
++входам и возвращает расчёт, сохраняя фазу и ресурсы сессии.
++
++Все поля тела обязательны:
++
++```json
++{
++  "average_price": "1.9",
++  "orders_per_client": "1.3",
++  "clients": 42,
++  "advertising_budget": "0",
++  "marketing_payroll": "10",
++  "development_payroll": "90",
++  "support_payroll": "60"
++}
++```
++
++`clients` — строго целое число от нуля; bool, дробные числа и строки
++не принимаются. Остальные поля — конечные неотрицательные Decimal, передаваемые
++JSON-числом или строкой. Сервер задаёт акт 1 и начальный баланс из сохранённого
++состояния; поля `act_number`, `balance_at_start` и любые дополнительные поля
++запрещены. Неверные значения, NaN/Infinity (включая сырой нестандартный JSON),
++malformed JSON и непредставимые при расчёте Decimal дают безопасный `422`.
++Ошибки валидации всех новых POST-команд первого акта возвращают общий detail
++`Invalid act one request`, чтобы не отражать невалидные числовые значения.
++
++Успех — `200` с `arpc`, `gross_revenue`, `unit_cogs`, `total_cogs`,
++`business_costs`, `operating_costs`, `result`, `balance_after_result`.
++Все Decimal сериализуются строками без дополнительного округления до копеек.
++Пример при сохранённом балансе 675.00 даёт результат -140.86 и остаток 534.14.
++Отрицательные результат и расчётный остаток допустимы. Предпросмотр не записывает
++P&L, не меняет баланс/AP/клиентов/команды/бонусы и не завершает акт.
++
++Auth/role проверяются до фазы: `401` для отсутствующего/неверного/чужого
++credential, admin JWT и неизвестной сессии, `403` для своей другой роли,
++`409` вне активного первого акта или без состояния, санитизированный `503`
++при ошибке БД. Авторизация, роль, фаза и состояние читаются одним SELECT.
++Проверки: `python -m pytest tests/test_act_one_pnl.py`.
+--- a/backend/app/act_one.py
++++ b/backend/app/act_one.py
+@@ -1,195 +1,235 @@
+ """Transactional first-act operations and construction of public snapshots."""
+ 
+ import hashlib
+ import secrets
+ from collections.abc import Iterator
+ from contextlib import contextmanager
++from decimal import DecimalException
+ from uuid import UUID
+ 
+ from fastapi import HTTPException
+-from sqlalchemy import and_, select
++from sqlalchemy import Select, and_, select
+ from sqlalchemy.exc import SQLAlchemyError
+ from sqlalchemy.orm import Session
+ 
+ from app.act_one_baseline import build_act_one_baseline
+-from app.act_one_schemas import ActOneSnapshot, StartingBonusSnapshot
++from app.act_one_schemas import (
++    ActOneSnapshot,
++    PnlPreviewInputs,
++    PnlPreviewResult,
++    StartingBonusSnapshot,
++)
+ from app.auth import unauthorized
+ from app.database import create_database_engine, transaction
+ from app.models import ActOneState, GameSession, Participant, RoleAssignment
++from app.pnl import PnlInputs, calculate_act_pnl
+ from app.schemas import RoleCode
+ from app.starting_bonus import resolve_starting_roll
+ 
+ FIRST_HIRING_UPGRADE_COST = 30
+ 
+ 
+ @contextmanager
+ def act_one_transaction() -> Iterator[Session]:
+     """Own the engine and translate database failures, including failed commit."""
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 yield session
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(status_code=503, detail="Act one unavailable") from None
+ 
+ 
+ def locked_game(session: Session, session_id: UUID) -> GameSession:
+     """Serialize changes to a session with preparation and other act actions."""
+     game = session.scalar(
+         select(GameSession).where(GameSession.id == session_id).with_for_update()
+     )
+     if game is None:
+         raise HTTPException(status_code=404, detail="Session not found")
+     return game
+ 
+ 
+ def participant_digest(credential: str) -> str:
+     return hashlib.sha256(credential.encode("utf-8")).hexdigest()
+ 
+ 
+ def require_session_role(
+     session: Session, session_id: UUID, credential: str, role: RoleCode
+ ) -> UUID:
+     """Check membership and role without loading phase or mutable act state."""
+     actor = session.execute(
++        _participant_role_query(credential).where(Participant.session_id == session_id)
++    ).one_or_none()
++    if actor is None:
++        raise unauthorized()
++    _require_role(actor.role_code, role)
++    return actor.id
++
++
++def _require_role(actual_role: str | None, required_role: RoleCode) -> None:
++    if actual_role != required_role:
++        raise HTTPException(status_code=403, detail="Required role is not assigned")
++
++
++def _participant_role_query(credential: str) -> Select:
++    return (
+         select(Participant.id, RoleAssignment.role_code)
++        .select_from(Participant)
+         .outerjoin(
+             RoleAssignment,
+             and_(
+                 RoleAssignment.session_id == Participant.session_id,
+                 RoleAssignment.participant_id == Participant.id,
+             ),
+         )
+         .where(
+-            Participant.session_id == session_id,
+             Participant.credential_digest == participant_digest(credential),
+         )
+-    ).one_or_none()
+-    if actor is None:
+-        raise unauthorized()
+-    if actor.role_code != role:
+-        raise HTTPException(status_code=403, detail="Required role is not assigned")
+-    return actor.id
++    )
+ 
+ 
+ def build_act_one_snapshot(state: ActOneState) -> ActOneSnapshot:
+     bonus = resolve_starting_roll(state.starting_roll)
+     return ActOneSnapshot(
+         session_id=state.session_id,
+         started_at=state.started_at,
+         balance=state.balance,
+         clients=state.clients,
+         action_points=state.action_points,
+         hiring_level=state.hiring_level,
+         hiring_capacity=state.hiring_capacity,
+         hired_development_team_grades=list(state.hired_development_team_grades),
+         experiments_per_development_team=state.experiments_per_development_team,
+         starting_bonus=StartingBonusSnapshot(
+             roll=bonus.roll,
+             code=bonus.code,
+             description=bonus.description,
+             available=state.starting_bonus_available,
+         ),
+     )
+ 
+ 
+ def start_act_one(session_id: UUID) -> ActOneSnapshot:
+     """Create the act once or return its current committed state on a retry."""
+     with act_one_transaction() as session:
+         game = locked_game(session, session_id)
+         state = session.get(ActOneState, session_id)
+         if game.status == "act_one":
+             if state is None:
+                 raise HTTPException(status_code=409, detail="Act one state missing")
+         elif game.status == "preparation":
+             roles = set(
+                 session.scalars(
+                     select(RoleAssignment.role_code).where(
+                         RoleAssignment.session_id == session_id
+                     )
+                 )
+             )
+             if (
+                 game.captain_participant_id is None
+                 or roles != {"cto", "cmo", "people", "cfo"}
+                 or state is not None
+             ):
+                 raise HTTPException(status_code=409, detail="Session is not ready")
+             baseline = build_act_one_baseline()
+             bonus = resolve_starting_roll(secrets.randbelow(10) + 1)
+             state = ActOneState(
+                 session_id=session_id,
+                 balance=baseline.balance,
+                 clients=baseline.clients + bonus.client_bonus,
+                 action_points=baseline.available_action_points
+                 + bonus.action_point_bonus,
+                 hiring_level=baseline.hiring_level,
+                 hiring_capacity=baseline.hiring_capacity,
+                 hired_development_team_grades=list(
+                     baseline.hired_development_team_grades
+                 ),
+                 experiments_per_development_team=baseline.experiments_per_development_team,
+                 starting_roll=bonus.roll,
+                 starting_bonus_available=bonus.deferred,
+             )
+             session.add(state)
+             game.status = "act_one"
+             session.flush()
+         else:
+             raise HTTPException(status_code=409, detail="Session cannot start act one")
+         response = build_act_one_snapshot(state)
+     return response
+ 
+ 
+-def read_act_one(session_id: UUID, credential: str) -> ActOneSnapshot:
++def read_act_one(
++    session_id: UUID, credential: str, *, required_role: RoleCode | None = None
++) -> ActOneSnapshot:
+     """Authorize membership and read the act from one PostgreSQL snapshot."""
+-    digest = participant_digest(credential)
+-    is_member = (
+-        select(Participant.id)
+-        .where(
+-            Participant.session_id == GameSession.id,
+-            Participant.credential_digest == digest,
+-        )
++    actor = (
++        _participant_role_query(credential)
++        .where(Participant.session_id == GameSession.id)
+         .correlate(GameSession)
+-        .exists()
+     )
+     statement = (
+-        select(GameSession.status, ActOneState)
++        select(
++            GameSession.status,
++            ActOneState,
++            actor.with_only_columns(RoleAssignment.role_code).scalar_subquery(),
++        )
+         .outerjoin(ActOneState, ActOneState.session_id == GameSession.id)
+-        .where(GameSession.id == session_id, is_member)
++        .where(GameSession.id == session_id, actor.exists())
+     )
+     with act_one_transaction() as session:
+         row = session.execute(statement).one_or_none()
+         if row is None:
+             raise unauthorized()
+-        status, state = row
++        status, state, role_code = row
++        if required_role is not None:
++            _require_role(role_code, required_role)
+         if status != "act_one" or state is None:
+             raise HTTPException(status_code=409, detail="Act one is not available")
+         response = build_act_one_snapshot(state)
+     return response
++
++
++def preview_act_one_pnl(
++    session_id: UUID, credential: str, inputs: PnlPreviewInputs
++) -> PnlPreviewResult:
++    """Calculate P&L without writing results or ending the current act."""
++    snapshot = read_act_one(session_id, credential, required_role="cfo")
++    try:
++        result = calculate_act_pnl(
++            PnlInputs(
++                act_number=1,
++                balance_at_start=snapshot.balance,
++                **inputs.model_dump(),
++            )
++        )
++    except DecimalException:
++        raise HTTPException(
++            status_code=422, detail="P&L inputs cannot be represented"
++        ) from None
++    return PnlPreviewResult.model_validate(result)
+ 
+ 
+ def upgrade_hiring(session_id: UUID, credential: str) -> ActOneSnapshot:
+     """Buy capacity 2 -> 3 once; actual teams and other resources stay intact."""
+     with act_one_transaction() as session:
+         require_session_role(session, session_id, credential, "people")
+         game = locked_game(session, session_id)
+         if game.status != "act_one":
+             raise HTTPException(status_code=409, detail="Act one is not available")
+         # Load state only after waiting for the shared game lock, so a queued
+         # request observes committed resources rather than a stale ORM object.
+         state = session.get(ActOneState, session_id)
+         if state is None:
+             raise HTTPException(status_code=409, detail="Act one state missing")
+         if state.hiring_level == 0:
+             if state.action_points < FIRST_HIRING_UPGRADE_COST:
+                 raise HTTPException(status_code=409, detail="Not enough action points")
+             state.action_points -= FIRST_HIRING_UPGRADE_COST
+             state.hiring_level = 1
+             state.hiring_capacity = 3
+             session.flush()
+         response = build_act_one_snapshot(state)
+     return response
+--- a/backend/app/act_one_api.py
++++ b/backend/app/act_one_api.py
+@@ -1,62 +1,78 @@
+ """HTTP routes for the first act, independent of the application module."""
+ 
+ import logging
+ from uuid import UUID
+ 
+ from fastapi import APIRouter, Depends, Request
+ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+ from starlette.concurrency import run_in_threadpool
+ 
+-from app.act_one import read_act_one, start_act_one, upgrade_hiring
+-from app.act_one_schemas import ActOneSnapshot, EmptyActOneCommand
++from app.act_one import preview_act_one_pnl, read_act_one, start_act_one, upgrade_hiring
++from app.act_one_schemas import (
++    ActOneSnapshot,
++    EmptyActOneCommand,
++    PnlPreviewInputs,
++    PnlPreviewResult,
++)
+ from app.auth import require_admin, unauthorized
+ 
+ router = APIRouter()
+ logger = logging.getLogger(__name__)
+ participant_bearer = HTTPBearer(auto_error=False)
+ 
+ 
+ def participant_credential(
+     credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+ ) -> str:
+     """Require a participant Bearer before attempting any database access."""
+     if credentials is None:
+         raise unauthorized()
+     return credentials.credentials
+ 
+ 
+ @router.post(
+     "/sessions/{session_id}/acts/1/start",
+     response_model=ActOneSnapshot,
+     dependencies=[Depends(require_admin)],
+ )
+ async def start_first_act(
+     request: Request,
+     session_id: UUID,
+     payload: EmptyActOneCommand | None = None,
+ ) -> ActOneSnapshot:
+     response = await run_in_threadpool(start_act_one, session_id)
+     try:
+         await request.app.state.lobby_hub.publish(session_id)
+     except Exception:
+         # Persistence has already committed. A retry may republish the snapshot.
+         logger.warning("Lobby publication failed after act one start")
+     return response
+ 
+ 
+ @router.get("/sessions/{session_id}/acts/1", response_model=ActOneSnapshot)
+ def get_first_act(
+     session_id: UUID, credential: str = Depends(participant_credential)
+ ) -> ActOneSnapshot:
+     return read_act_one(session_id, credential)
+ 
+ 
+ @router.post(
+     "/sessions/{session_id}/acts/1/hiring/upgrade", response_model=ActOneSnapshot
+ )
+ def upgrade_first_hiring_level(
+     session_id: UUID,
+     payload: EmptyActOneCommand | None = None,
+     credential: str = Depends(participant_credential),
+ ) -> ActOneSnapshot:
+     return upgrade_hiring(session_id, credential)
++
++
++@router.post(
++    "/sessions/{session_id}/acts/1/pnl/preview", response_model=PnlPreviewResult
++)
++def preview_first_act_pnl(
++    session_id: UUID,
++    payload: PnlPreviewInputs,
++    credential: str = Depends(participant_credential),
++) -> PnlPreviewResult:
++    return preview_act_one_pnl(session_id, credential, payload)
+--- a/backend/app/act_one_schemas.py
++++ b/backend/app/act_one_schemas.py
+@@ -1,35 +1,63 @@
+ """Commands and snapshots for the persisted first act."""
+ 
+ from decimal import Decimal
+-from typing import Literal
++from typing import Annotated, Literal
+ from uuid import UUID
+ 
+-from pydantic import AwareDatetime, BaseModel, ConfigDict
++from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+ 
+ from app.starting_bonus import BonusCode
+ 
+ 
+ class EmptyActOneCommand(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+ 
+ 
+ class StartingBonusSnapshot(BaseModel):
+     roll: int
+     code: BonusCode
+     description: str
+     available: bool
+ 
+ 
+ class ActOneSnapshot(BaseModel):
+     session_id: UUID
+     act_number: Literal[1] = 1
+     status: Literal["act_one"] = "act_one"
+     started_at: AwareDatetime
+     balance: Decimal
+     clients: int
+     action_points: int
+     hiring_level: int
+     hiring_capacity: int
+     hired_development_team_grades: list[str]
+     experiments_per_development_team: int
+     starting_bonus: StartingBonusSnapshot
++
++
++NonnegativeDecimal = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
++
++
++class PnlPreviewInputs(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    average_price: NonnegativeDecimal
++    orders_per_client: NonnegativeDecimal
++    clients: Annotated[int, Field(strict=True, ge=0)]
++    advertising_budget: NonnegativeDecimal
++    marketing_payroll: NonnegativeDecimal
++    development_payroll: NonnegativeDecimal
++    support_payroll: NonnegativeDecimal
++
++
++class PnlPreviewResult(BaseModel):
++    model_config = ConfigDict(from_attributes=True, allow_inf_nan=False)
++
++    arpc: Decimal
++    gross_revenue: Decimal
++    unit_cogs: Decimal
++    total_cogs: Decimal
++    business_costs: Decimal
++    operating_costs: Decimal
++    result: Decimal
++    balance_after_result: Decimal
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -1,740 +1,749 @@
+ """Minimal HTTP service for the IPO learning game."""
+ 
+ import asyncio
+ import hashlib
+ import secrets
+ from collections.abc import AsyncIterator
+ from contextlib import asynccontextmanager
+ from dataclasses import dataclass, field
+ from uuid import UUID
+ from weakref import WeakValueDictionary
+ 
+ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
+ from fastapi.exception_handlers import request_validation_exception_handler
+ from fastapi.exceptions import RequestValidationError
+ from fastapi.responses import JSONResponse
+ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+ from sqlalchemy import and_, or_, select
+ from sqlalchemy.exc import SQLAlchemyError
+ from starlette.concurrency import run_in_threadpool
+ from starlette.websockets import WebSocketDisconnect
+ 
+ from app.act_one_api import router as act_one_router
+ from app.auth import login_token, require_admin, unauthorized
+ from app.database import create_database_engine, transaction
+ from app.models import GameSession, Participant, RoleAssignment
+ from app.schemas import (
+     CaptainAssign,
+     CaptainAssigned,
+     LobbyParticipant,
+     LobbySnapshot,
+     LoginRequest,
+     LoginResponse,
+     ParticipantIdentity,
+     ParticipantJoin,
+     ParticipantJoined,
+     PreparationRoles,
+     PreparationSnapshot,
+     RoleAssign,
+     RoleAssigned,
+     RoleCode,
+     SessionCreate,
+     SessionCreated,
+ )
+ 
+ 
+ def _get_lobby_snapshot(
+     session_id: UUID, credential: str | None = None
+ ) -> LobbySnapshot:
+     credential_digest = (
+         hashlib.sha256(credential.encode("utf-8")).hexdigest()
+         if credential is not None
+         else None
+     )
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 game = session.get(GameSession, session_id)
+                 if game is None:
+                     raise HTTPException(status_code=404, detail="Session not found")
+                 if credential_digest is not None:
+                     participant = session.scalar(
+                         select(Participant.id).where(
+                             Participant.session_id == session_id,
+                             Participant.credential_digest == credential_digest,
+                         )
+                     )
+                     if participant is None:
+                         raise HTTPException(
+                             status_code=401,
+                             detail="Invalid participant credentials",
+                             headers={"WWW-Authenticate": "Bearer"},
+                         )
+                 participants = session.scalars(
+                     select(Participant)
+                     .where(Participant.session_id == session_id)
+                     .order_by(Participant.created_at, Participant.id)
+                 ).all()
+                 response = LobbySnapshot(
+                     id=game.id,
+                     name=game.name,
+                     status=game.status,
+                     participants=[
+                         LobbyParticipant.model_validate(item) for item in participants
+                     ],
+                 )
+             return response
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Lobby lookup unavailable"
+         ) from None
+ 
+ 
+ @dataclass
+ class LobbyConnection:
+     websocket: WebSocket
+     handler_task: asyncio.Task | None
+     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+     ready: asyncio.Event = field(default_factory=asyncio.Event)
+     last_revision: int = -1
+     active: bool = True
+ 
+ 
+ @dataclass
+ class SessionConnections:
+     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+     snapshot_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+     revision: int = 0
+     connections: dict[WebSocket, LobbyConnection] = field(default_factory=dict)
+ 
+ 
+ class LobbyHub:
+     """Keep connected sockets current with committed lobby snapshots."""
+ 
+     send_timeout = 1.0
+     close_timeout = 1.0
+ 
+     def __init__(self) -> None:
+         self._registry_lock = asyncio.Lock()
+         self._sessions: WeakValueDictionary[UUID, SessionConnections] = (
+             WeakValueDictionary()
+         )
+ 
+     async def _session(
+         self, session_id: UUID, *, create: bool
+     ) -> SessionConnections | None:
+         async with self._registry_lock:
+             connections = self._sessions.get(session_id)
+             if connections is None and create:
+                 connections = SessionConnections()
+                 self._sessions[session_id] = connections
+             return connections
+ 
+     async def _send(
+         self, connection: LobbyConnection, payload: dict, revision: int
+     ) -> bool:
+         try:
+             async with asyncio.timeout(self.send_timeout):
+                 await connection.ready.wait()
+                 async with connection.send_lock:
+                     if not connection.active or revision <= connection.last_revision:
+                         return True
+                     await connection.websocket.send_json(payload)
+                     connection.last_revision = revision
+         except (OSError, RuntimeError, TimeoutError, WebSocketDisconnect):
+             return False
+         return True
+ 
+     async def _snapshot(
+         self, session_id: UUID, connections: SessionConnections
+     ) -> tuple[LobbySnapshot, int]:
+         async with connections.snapshot_lock:
+             snapshot = await run_in_threadpool(_get_lobby_snapshot, session_id)
+             connections.revision += 1
+             return snapshot, connections.revision
+ 
+     async def _remove_if_current(
+         self, connections: SessionConnections, connection: LobbyConnection
+     ) -> bool:
+         async with connections.lock:
+             if connections.connections.get(connection.websocket) is not connection:
+                 return False
+             connections.connections.pop(connection.websocket)
+             connection.active = False
+             return True
+ 
+     async def _cancel_handler(self, connection: LobbyConnection) -> None:
+         current_task = asyncio.current_task()
+         if (
+             connection.handler_task is not None
+             and connection.handler_task is not current_task
+         ):
+             connection.handler_task.cancel()
+ 
+     async def _initial_send(
+         self, connection: LobbyConnection, payload: dict, revision: int
+     ) -> bool:
+         try:
+             async with connection.send_lock:
+                 async with asyncio.timeout(self.send_timeout):
+                     await connection.websocket.send_json(payload)
+                     connection.last_revision = revision
+         except (OSError, RuntimeError, TimeoutError, WebSocketDisconnect):
+             return False
+         finally:
+             connection.ready.set()
+         return True
+ 
+     async def _close(
+         self,
+         websocket: WebSocket,
+         *,
+         code: int = 1011,
+         reason: str = "Lobby send timed out",
+     ) -> None:
+         try:
+             await asyncio.wait_for(
+                 websocket.close(code=code, reason=reason),
+                 timeout=self.close_timeout,
+             )
+         except (OSError, RuntimeError, TimeoutError, WebSocketDisconnect):
+             pass
+ 
+     async def connect(
+         self,
+         websocket: WebSocket,
+         session_id: UUID,
+         handler_task: asyncio.Task | None = None,
+     ) -> tuple[SessionConnections, LobbyConnection]:
+         connections = await self._session(session_id, create=True)
+         assert connections is not None
+         connection = LobbyConnection(websocket, handler_task)
+         await websocket.accept()
+         async with connections.lock:
+             connections.connections[websocket] = connection
+         try:
+             snapshot, revision = await self._snapshot(session_id, connections)
+             sent = await self._initial_send(
+                 connection, snapshot.model_dump(mode="json"), revision
+             )
+         except BaseException:
+             connection.ready.set()
+             removed = await self._remove_if_current(connections, connection)
+             if removed:
+                 await self._cancel_handler(connection)
+             raise
+         if not sent:
+             removed = await self._remove_if_current(connections, connection)
+             if removed:
+                 await self._cancel_handler(connection)
+             raise HTTPException(status_code=503, detail="Lobby unavailable")
+         return connections, connection
+ 
+     async def publish(self, session_id: UUID) -> None:
+         connections = await self._session(session_id, create=False)
+         if connections is None:
+             return
+         timed_out: list[LobbyConnection] = []
+         async with connections.lock:
+             active = tuple(connections.connections.values())
+         if not active:
+             return
+         snapshot, revision = await self._snapshot(session_id, connections)
+         payload = snapshot.model_dump(mode="json")
+         results = await asyncio.gather(
+             *(self._send(connection, payload, revision) for connection in active)
+         )
+         for connection, sent in zip(active, results, strict=True):
+             if not sent:
+                 if await self._remove_if_current(connections, connection):
+                     timed_out.append(connection)
+         for connection in timed_out:
+             await self._cancel_handler(connection)
+         await asyncio.gather(
+             *(self._close(connection.websocket) for connection in timed_out)
+         )
+ 
+     async def disconnect(
+         self, websocket: WebSocket, connections: SessionConnections
+     ) -> None:
+         async with connections.lock:
+             connection = connections.connections.pop(websocket, None)
+             if connection is not None:
+                 connection.active = False
+ 
+ 
+ @asynccontextmanager
+ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+     application.state.lobby_hub = LobbyHub()
+     yield
+ 
+ 
+ app = FastAPI(lifespan=lifespan)
+ app.include_router(act_one_router)
+ participant_bearer = HTTPBearer(auto_error=False)
+ 
+ 
+ @app.exception_handler(RequestValidationError)
+ async def safe_validation(
+     request: Request, exc: RequestValidationError
+ ) -> JSONResponse:
+     """Never reflect credentials, even in malformed JSON or missing-field errors."""
+     if request.url.path == "/auth/login":
+         return JSONResponse(
+             status_code=422, content={"detail": "Invalid login request"}
++        )
++    route = request.scope.get("route")
++    if getattr(route, "path", None) in {
++        "/sessions/{session_id}/acts/1/start",
++        "/sessions/{session_id}/acts/1/hiring/upgrade",
++        "/sessions/{session_id}/acts/1/pnl/preview",
++    }:
++        return JSONResponse(
++            status_code=422, content={"detail": "Invalid act one request"}
+         )
+     return await request_validation_exception_handler(request, exc)
+ 
+ 
+ @app.post("/auth/login", response_model=LoginResponse)
+ def login(payload: LoginRequest) -> LoginResponse:
+     return LoginResponse(
+         access_token=login_token(payload.username, payload.password.get_secret_value())
+     )
+ 
+ 
+ @app.get("/health")
+ def health() -> dict[str, str]:
+     """Report that the HTTP process is responding."""
+     return {"status": "ok"}
+ 
+ 
+ @app.post(
+     "/sessions",
+     status_code=201,
+     response_model=SessionCreated,
+     dependencies=[Depends(require_admin)],
+ )
+ def create_session(payload: SessionCreate) -> SessionCreated:
+     """Create a session as the administrator; return only after commit."""
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 game = GameSession(name=payload.name)
+                 session.add(game)
+                 session.flush()
+                 # Snapshot defaults before commit expires the ORM object.
+                 response = SessionCreated.model_validate(game)
+             return response
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Session creation unavailable"
+         ) from None
+ 
+ 
+ def _start_preparation(session_id: UUID) -> SessionCreated:
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 game = session.scalar(
+                     select(GameSession)
+                     .where(GameSession.id == session_id)
+                     .with_for_update()
+                 )
+                 if game is None:
+                     raise HTTPException(status_code=404, detail="Session not found")
+                 if game.status == "lobby":
+                     game.status = "preparation"
+                     session.flush()
+                 elif game.status != "preparation":
+                     raise HTTPException(
+                         status_code=409, detail="Session cannot start preparation"
+                     )
+                 response = SessionCreated.model_validate(game)
+             return response
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Preparation start unavailable"
+         ) from None
+ 
+ 
+ @app.post(
+     "/sessions/{session_id}/preparation/start",
+     response_model=SessionCreated,
+     dependencies=[Depends(require_admin)],
+ )
+ async def start_preparation(request: Request, session_id: UUID) -> SessionCreated:
+     """Start preparation once and publish its snapshot on every successful retry."""
+     response = await run_in_threadpool(_start_preparation, session_id)
+     await request.app.state.lobby_hub.publish(session_id)
+     return response
+ 
+ 
+ @app.get("/sessions/{session_id}/preparation", response_model=PreparationSnapshot)
+ def get_preparation(
+     session_id: UUID,
+     credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+ ) -> PreparationSnapshot:
+     """Read the session, roster and assignments from one PostgreSQL snapshot."""
+     if credentials is None:
+         raise unauthorized()
+     credential_digest = hashlib.sha256(
+         credentials.credentials.encode("utf-8")
+     ).hexdigest()
+     is_member = (
+         select(Participant.id)
+         .where(
+             Participant.session_id == GameSession.id,
+             Participant.credential_digest == credential_digest,
+         )
+         .correlate(GameSession)
+         .exists()
+     )
+     # One SELECT gives the authorization check and all returned data one snapshot.
+     statement = (
+         select(
+             GameSession.id.label("session_id"),
+             GameSession.name,
+             GameSession.status,
+             GameSession.captain_participant_id,
+             Participant.id.label("participant_id"),
+             Participant.display_name,
+             RoleAssignment.role_code,
+         )
+         .join(Participant, Participant.session_id == GameSession.id)
+         .outerjoin(
+             RoleAssignment,
+             and_(
+                 RoleAssignment.session_id == Participant.session_id,
+                 RoleAssignment.participant_id == Participant.id,
+             ),
+         )
+         .where(GameSession.id == session_id, is_member)
+         .order_by(Participant.created_at, Participant.id)
+     )
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 rows = session.execute(statement).all()
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Preparation lookup unavailable"
+         ) from None
+ 
+     if not rows:
+         raise unauthorized()
+     game = rows[0]
+     if game.status != "preparation":
+         raise HTTPException(status_code=409, detail="Session is not in preparation")
+     role_owners = {
+         row.role_code: row.participant_id for row in rows if row.role_code is not None
+     }
+     return PreparationSnapshot(
+         id=game.session_id,
+         name=game.name,
+         status=game.status,
+         participants=[
+             LobbyParticipant(id=row.participant_id, display_name=row.display_name)
+             for row in rows
+         ],
+         captain_participant_id=game.captain_participant_id,
+         roles=PreparationRoles(
+             cto=role_owners.get("cto"),
+             cmo=role_owners.get("cmo"),
+             people=role_owners.get("people"),
+             cfo=role_owners.get("cfo"),
+         ),
+     )
+ 
+ 
+ @app.put(
+     "/sessions/{session_id}/preparation/captain",
+     response_model=CaptainAssigned,
+     dependencies=[Depends(require_admin)],
+ )
+ def assign_captain(session_id: UUID, payload: CaptainAssign) -> CaptainAssigned:
+     """Assign a joined participant while the session is in preparation."""
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 game = session.scalar(
+                     select(GameSession)
+                     .where(GameSession.id == session_id)
+                     .with_for_update()
+                 )
+                 if game is None:
+                     raise HTTPException(status_code=404, detail="Session not found")
+                 if game.status != "preparation":
+                     raise HTTPException(
+                         status_code=409, detail="Session is not in preparation"
+                     )
+                 participant_id = session.scalar(
+                     select(Participant.id).where(
+                         Participant.session_id == session_id,
+                         Participant.id == payload.participant_id,
+                     )
+                 )
+                 if participant_id is None:
+                     raise HTTPException(status_code=404, detail="Participant not found")
+                 if game.captain_participant_id != participant_id:
+                     game.captain_participant_id = participant_id
+                 response = CaptainAssigned(
+                     session_id=game.id,
+                     captain_participant_id=participant_id,
+                 )
+             return response
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Captain assignment unavailable"
+         ) from None
+ 
+ 
+ @app.put(
+     "/sessions/{session_id}/preparation/roles/{role_code}",
+     response_model=RoleAssigned,
+ )
+ def assign_role(
+     session_id: UUID,
+     role_code: RoleCode,
+     payload: RoleAssign,
+     credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+ ) -> RoleAssigned:
+     """Let a joined participant claim their own role during preparation."""
+     if credentials is None:
+         raise unauthorized()
+     credential_digest = hashlib.sha256(
+         credentials.credentials.encode("utf-8")
+     ).hexdigest()
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 participant_id = session.scalar(
+                     select(Participant.id).where(
+                         Participant.session_id == session_id,
+                         Participant.credential_digest == credential_digest,
+                     )
+                 )
+                 if participant_id is None:
+                     raise unauthorized()
+                 if participant_id != payload.participant_id:
+                     raise HTTPException(
+                         status_code=403,
+                         detail="Participants can only choose their own role",
+                     )
+                 # Serialize claims and phase checks on the same session row.
+                 status = session.scalar(
+                     select(GameSession.status)
+                     .where(GameSession.id == session_id)
+                     .with_for_update()
+                 )
+                 if status is None:
+                     raise unauthorized()
+                 if status != "preparation":
+                     raise HTTPException(
+                         status_code=409, detail="Session is not in preparation"
+                     )
+                 assignment = session.scalar(
+                     select(RoleAssignment).where(
+                         RoleAssignment.session_id == session_id,
+                         or_(
+                             RoleAssignment.role_code == role_code,
+                             RoleAssignment.participant_id == participant_id,
+                         ),
+                     )
+                 )
+                 if assignment is None:
+                     session.add(
+                         RoleAssignment(
+                             session_id=session_id,
+                             role_code=role_code,
+                             participant_id=participant_id,
+                         )
+                     )
+                 elif (
+                     assignment.role_code != role_code
+                     or assignment.participant_id != participant_id
+                 ):
+                     raise HTTPException(
+                         status_code=409, detail="Role or participant already assigned"
+                     )
+             return RoleAssigned(
+                 session_id=session_id,
+                 role_code=role_code,
+                 participant_id=participant_id,
+             )
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Role assignment unavailable"
+         ) from None
+ 
+ 
+ def _join_participant(session_id: UUID, payload: ParticipantJoin) -> ParticipantJoined:
+     credential = secrets.token_urlsafe(32)
+     credential_digest = hashlib.sha256(credential.encode("utf-8")).hexdigest()
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 if session.get(GameSession, session_id) is None:
+                     raise HTTPException(status_code=404, detail="Session not found")
+                 participant = Participant(
+                     session_id=session_id,
+                     display_name=payload.display_name,
+                     credential_digest=credential_digest,
+                 )
+                 session.add(participant)
+                 session.flush()
+                 response = ParticipantJoined(
+                     id=participant.id,
+                     display_name=participant.display_name,
+                     participant_credential=credential,
+                 )
+         finally:
+             engine.dispose()
+         return response
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Participant join unavailable"
+         ) from None
+ 
+ 
+ @app.post(
+     "/sessions/{session_id}/participants",
+     status_code=201,
+     response_model=ParticipantJoined,
+ )
+ async def join_session(
+     request: Request, session_id: UUID, payload: ParticipantJoin
+ ) -> ParticipantJoined:
+     """Create distinct membership and publish the committed lobby update."""
+     response = await run_in_threadpool(_join_participant, session_id, payload)
+     try:
+         await request.app.state.lobby_hub.publish(session_id)
+     except HTTPException:
+         # Membership is already committed; reconnecting still returns its state.
+         pass
+     return response
+ 
+ 
+ @app.get(
+     "/sessions/{session_id}/participants/me",
+     response_model=ParticipantIdentity,
+ )
+ def get_my_participant(
+     session_id: UUID,
+     credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+ ) -> ParticipantIdentity:
+     """Restore membership only when its session-scoped credential is supplied."""
+     if credentials is None:
+         raise HTTPException(
+             status_code=401,
+             detail="Invalid participant credentials",
+             headers={"WWW-Authenticate": "Bearer"},
+         )
+     credential_digest = hashlib.sha256(
+         credentials.credentials.encode("utf-8")
+     ).hexdigest()
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 participant = session.scalar(
+                     select(Participant).where(
+                         Participant.session_id == session_id,
+                         Participant.credential_digest == credential_digest,
+                     )
+                 )
+                 if participant is None:
+                     raise HTTPException(
+                         status_code=401,
+                         detail="Invalid participant credentials",
+                         headers={"WWW-Authenticate": "Bearer"},
+                     )
+                 response = ParticipantIdentity.model_validate(participant)
+             return response
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(
+             status_code=503, detail="Participant lookup unavailable"
+         ) from None
+ 
+ 
+ @app.get("/sessions/{session_id}/lobby", response_model=LobbySnapshot)
+ def get_lobby(
+     session_id: UUID,
+     credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
+ ) -> LobbySnapshot:
+     """Return an authenticated snapshot of the session's current lobby state."""
+     if credentials is None:
+         raise HTTPException(
+             status_code=401,
+             detail="Invalid participant credentials",
+             headers={"WWW-Authenticate": "Bearer"},
+         )
+     return _get_lobby_snapshot(session_id, credentials.credentials)
+ 
+ 
+ def _websocket_participant_credential(websocket: WebSocket) -> str | None:
+     authorization = websocket.headers.get("authorization")
+     offered = [
+         protocol.removeprefix("ipo-participant.")
+         for protocol in websocket.scope.get("subprotocols", [])
+         if protocol.startswith("ipo-participant.")
+     ]
+     if authorization is not None and offered:
+         return None
+     if authorization is not None:
+         scheme, separator, credential = authorization.partition(" ")
+         if scheme.casefold() == "bearer" and separator and credential:
+             return credential
+         return None
+     if len(offered) == 1 and offered[0]:
+         return offered[0]
+     return None
+ 
+ 
+ @app.websocket("/sessions/{session_id}/lobby/ws")
+ async def lobby_websocket(websocket: WebSocket, session_id: UUID) -> None:
+     hub: LobbyHub = websocket.app.state.lobby_hub
+     credential = _websocket_participant_credential(websocket)
+     if credential is None:
+         await hub._close(websocket, code=1008, reason="Invalid participant credentials")
+         return
+     try:
+         await run_in_threadpool(_get_lobby_snapshot, session_id, credential)
+     except HTTPException:
+         await hub._close(websocket, code=1008, reason="Invalid participant credentials")
+         return
+ 
+     try:
+         connections, _ = await hub.connect(
+             websocket, session_id, asyncio.current_task()
+         )
+     except HTTPException:
+         await hub._close(websocket, reason="Lobby unavailable")
+         return
+     try:
+         while True:
+             message = await websocket.receive()
+             if message["type"] == "websocket.disconnect":
+                 break
+             await hub._close(
+                 websocket, code=1003, reason="Client messages are not supported"
+             )
+             break
+     finally:
+         cleanup = asyncio.create_task(hub.disconnect(websocket, connections))
+         try:
+             await asyncio.shield(cleanup)
+         except asyncio.CancelledError:
+             await cleanup
+             raise
+--- /dev/null
++++ b/backend/tests/test_act_one_pnl.py
+@@ -0,0 +1,365 @@
++"""CFO P&L preview, safe input validation and persistence isolation."""
++
++import json
++from unittest.mock import Mock
++from uuid import UUID, uuid4
++
++import pytest
++from fastapi.testclient import TestClient
++from sqlalchemy import event
++from sqlalchemy.exc import OperationalError
++
++from app.database import create_database_engine
++from app.main import app
++from app.models import ActOneState, GameSession
++from tests.test_act_one_hiring import hiring_path
++from tests.test_act_one_snapshot import snapshot_path
++from tests.test_act_one_start import client as client
++from tests.test_act_one_start import engine as engine
++from tests.test_act_one_start import prepared_team as prepared_team
++from tests.test_act_one_start import start_path, stored_state
++from tests.test_captain import create_session, join_session
++from tests.test_roles import participant_headers
++
++FINANCIAL_FIELDS = (
++    "average_price",
++    "orders_per_client",
++    "advertising_budget",
++    "marketing_payroll",
++    "development_payroll",
++    "support_payroll",
++)
++
++
++def preview_path(session_id):
++    return f"/sessions/{session_id}/acts/1/pnl/preview"
++
++
++@pytest.fixture
++def payload():
++    return {
++        "average_price": "1.9",
++        "orders_per_client": "1.3",
++        "clients": 42,
++        "advertising_budget": "0",
++        "marketing_payroll": "10",
++        "development_payroll": "90",
++        "support_payroll": "60",
++    }
++
++
++@pytest.fixture
++def validation_client(monkeypatch):
++    database = Mock(side_effect=AssertionError("Invalid preview accessed DB"))
++    monkeypatch.setattr("app.act_one.create_database_engine", database)
++    with TestClient(app, headers={"Authorization": "Bearer validation-only"}) as http:
++        yield http
++    database.assert_not_called()
++
++
++def test_preview_matches_excel_and_is_repeatable_without_writing_state(
++    client, engine, prepared_team, monkeypatch, payload
++):
++    session_id, members = prepared_team
++    started = client.post(start_path(session_id))
++    assert started.status_code == 200
++    before = stored_state(engine, session_id)
++    random = Mock(side_effect=AssertionError("Preview rolled RNG"))
++    monkeypatch.setattr("app.act_one.secrets.randbelow", random)
++    headers = participant_headers(members[3])
++    expected = {
++        "arpc": "2.47",
++        "gross_revenue": "103.74",
++        "unit_cogs": "1",
++        "total_cogs": "54.6",
++        "business_costs": "30",
++        "operating_costs": "190",
++        "result": "-140.86",
++        "balance_after_result": "534.14",
++    }
++    first = client.post(preview_path(session_id), headers=headers, json=payload)
++    assert first.status_code == 200
++    assert first.json() == expected
++    assert all(isinstance(value, str) for value in first.json().values())
++    assert "credential" not in first.text
++    assert "digest" not in first.text
++    repeat = client.post(preview_path(session_id), headers=headers, json=payload)
++    assert repeat.status_code == 200
++    assert repeat.json() == expected
++    assert stored_state(engine, session_id) == before
++    snapshot = client.get(snapshot_path(session_id), headers=headers)
++    assert snapshot.status_code == 200
++    assert snapshot.json() == started.json()
++    random.assert_not_called()
++
++
++def test_preview_accepts_json_numbers_and_uses_saved_balance(
++    client, engine, prepared_team, payload
++):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    with engine.begin() as connection:
++        connection.execute(
++            ActOneState.__table__.update()
++            .where(ActOneState.session_id == UUID(session_id))
++            .values(balance="500.123")
++        )
++    response = client.post(
++        preview_path(session_id),
++        headers=participant_headers(members[3]),
++        json={
++            **payload,
++            "average_price": 1.9,
++            "orders_per_client": 1.3,
++            "advertising_budget": 0,
++            "marketing_payroll": 10,
++            "development_payroll": 90,
++            "support_payroll": 60,
++        },
++    )
++    assert response.status_code == 200
++    assert response.json()["balance_after_result"] == "359.263"
++    assert response.json()["unit_cogs"] == "1"
++    assert response.json()["business_costs"] == "30"
++    assert str(stored_state(engine, session_id)["balance"]) == "500.123"
++
++
++def test_preview_authenticates_cfo_before_phase(client, engine, prepared_team, payload):
++    session_id, members = prepared_team
++    spectator = join_session(client, session_id, "Без роли")
++    other_session = create_session(client)
++    outsider = join_session(client, other_session, "Другая команда")
++    path = preview_path(session_id)
++    with TestClient(app) as anonymous:
++        denied = [
++            anonymous.post(path, json=payload),
++            client.post(path, json=payload),
++            anonymous.post(
++                path, headers={"Authorization": "Bearer invalid"}, json=payload
++            ),
++            anonymous.post(path, headers=participant_headers(outsider), json=payload),
++            anonymous.post(
++                preview_path(str(uuid4())),
++                headers=participant_headers(members[3]),
++                json=payload,
++            ),
++        ]
++    for response in denied:
++        assert response.status_code == 401
++        assert response.json() == {"detail": "Invalid credentials"}
++        assert response.headers["WWW-Authenticate"] == "Bearer"
++    for member in [*members[:3], spectator]:
++        forbidden = client.post(path, headers=participant_headers(member), json=payload)
++        assert forbidden.status_code == 403
++        assert forbidden.json() == {"detail": "Required role is not assigned"}
++    assert (
++        client.post(
++            path, headers=participant_headers(members[3]), json=payload
++        ).status_code
++        == 409
++    )
++    assert stored_state(engine, session_id) is None
++    assert client.post(start_path(session_id)).status_code == 200
++    assert (
++        client.post(
++            path, headers=participant_headers(members[3]), json=payload
++        ).status_code
++        == 200
++    )
++    assert (
++        client.post(
++            path, headers=participant_headers(members[2]), json=payload
++        ).status_code
++        == 403
++    )
++
++
++@pytest.mark.parametrize("phase", ["finished", "missing_state"])
++def test_preview_rejects_wrong_phase_and_missing_state(
++    client, engine, prepared_team, payload, phase
++):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    with engine.begin() as connection:
++        if phase == "finished":
++            connection.execute(
++                GameSession.__table__.update()
++                .where(GameSession.id == UUID(session_id))
++                .values(status=phase)
++            )
++        else:
++            connection.execute(
++                ActOneState.__table__.delete().where(
++                    ActOneState.session_id == UUID(session_id)
++                )
++            )
++    before = stored_state(engine, session_id)
++    response = client.post(
++        preview_path(session_id), headers=participant_headers(members[3]), json=payload
++    )
++    assert response.status_code == 409
++    assert stored_state(engine, session_id) == before
++
++
++def test_preview_uses_one_authorized_select_without_writes(
++    client, migrated_database, prepared_team, payload, monkeypatch
++):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    engine = create_database_engine(migrated_database)
++    try:
++        with engine.connect():
++            pass
++        statements = []
++        event.listen(
++            engine,
++            "before_cursor_execute",
++            lambda _connection, _cursor, statement, *_: statements.append(statement),
++        )
++        monkeypatch.setattr("app.act_one.create_database_engine", lambda: engine)
++        response = client.post(
++            preview_path(session_id),
++            headers=participant_headers(members[3]),
++            json=payload,
++        )
++        assert response.status_code == 200
++        assert len(statements) == 1
++        assert statements[0].lstrip().upper().startswith("SELECT ")
++        assert "FOR UPDATE" not in statements[0].upper()
++    finally:
++        engine.dispose()
++
++
++@pytest.mark.parametrize("field", FINANCIAL_FIELDS)
++@pytest.mark.parametrize(
++    "value", ["-0.01", "NaN", "Infinity", "-Infinity", True, None, "bad", [], {}]
++)
++def test_preview_validation_rejects_invalid_financial_values(
++    validation_client, payload, field, value
++):
++    response = validation_client.post(
++        preview_path(str(uuid4())), json={**payload, field: value}
++    )
++    assert response.status_code == 422
++    assert response.json() == {"detail": "Invalid act one request"}
++
++
++@pytest.mark.parametrize("clients", [True, False, 42.0, 42.5, "42", -1, None])
++def test_preview_validation_requires_strict_nonnegative_clients(
++    validation_client, payload, clients
++):
++    response = validation_client.post(
++        preview_path(str(uuid4())), json={**payload, "clients": clients}
++    )
++    assert response.status_code == 422
++    assert response.json() == {"detail": "Invalid act one request"}
++
++
++@pytest.mark.parametrize("field", [*FINANCIAL_FIELDS, "clients"])
++def test_preview_validation_requires_every_field(validation_client, payload, field):
++    del payload[field]
++    response = validation_client.post(preview_path(str(uuid4())), json=payload)
++    assert response.status_code == 422
++
++
++@pytest.mark.parametrize("field", ["act_number", "balance_at_start", "balance", "roll"])
++def test_preview_validation_forbids_server_fields(validation_client, payload, field):
++    response = validation_client.post(
++        preview_path(str(uuid4())), json={**payload, field: 1}
++    )
++    assert response.status_code == 422
++
++
++@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e10000"])
++def test_preview_validation_handles_raw_nonfinite_json(
++    validation_client, payload, number
++):
++    raw = json.dumps({**payload, "average_price": "RAW_NUMBER"}).replace(
++        '"RAW_NUMBER"', number
++    )
++    response = validation_client.post(
++        preview_path(str(uuid4())),
++        content=raw,
++        headers={"Content-Type": "application/json"},
++    )
++    assert response.status_code == 422
++    assert response.json() == {"detail": "Invalid act one request"}
++
++
++@pytest.mark.parametrize(
++    "body", ["{", '{"average_price":', "private malformed sentinel", "null", "[]", "1"]
++)
++def test_preview_validation_handles_malformed_or_nonobject_json(
++    validation_client, body
++):
++    response = validation_client.post(
++        preview_path(str(uuid4())),
++        content=body,
++        headers={"Content-Type": "application/json"},
++    )
++    assert response.status_code == 422
++    assert response.json() == {"detail": "Invalid act one request"}
++    assert "sentinel" not in response.text
++
++
++def test_preview_decimal_overflow_is_safe_422(client, engine, prepared_team, payload):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    before = stored_state(engine, session_id)
++    response = client.post(
++        preview_path(session_id),
++        headers=participant_headers(members[3]),
++        json={**payload, "average_price": "1e999999", "orders_per_client": "1e999999"},
++    )
++    assert response.status_code == 422
++    assert response.json() == {"detail": "P&L inputs cannot be represented"}
++    assert stored_state(engine, session_id) == before
++
++
++@pytest.mark.parametrize("failure", ["connection", "query"])
++def test_preview_database_failure_is_sanitized(
++    client, engine, prepared_team, payload, monkeypatch, failure
++):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    if failure == "connection":
++        monkeypatch.setattr(
++            "app.act_one.create_database_engine",
++            Mock(
++                side_effect=OperationalError(
++                    "private SQL sentinel", {}, Exception("private DSN")
++                )
++            ),
++        )
++    else:
++
++        def fail_query(*_):
++            raise OperationalError("private SQL sentinel", {}, Exception("private DSN"))
++
++        event.listen(engine, "before_cursor_execute", fail_query)
++        monkeypatch.setattr("app.act_one.create_database_engine", lambda: engine)
++    response = client.post(
++        preview_path(session_id), headers=participant_headers(members[3]), json=payload
++    )
++    assert response.status_code == 503
++    assert response.json() == {"detail": "Act one unavailable"}
++    assert "sentinel" not in response.text
++
++
++@pytest.mark.parametrize(
++    "command, body", [("start", '{"roll": NaN}'), ("hiring", '{"cost": Infinity}')]
++)
++def test_empty_act_commands_sanitize_raw_nonfinite_extra_fields(
++    client, engine, prepared_team, command, body
++):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    before = stored_state(engine, session_id)
++    path = start_path(session_id) if command == "start" else hiring_path(session_id)
++    headers = {} if command == "start" else participant_headers(members[2])
++    response = client.post(
++        path, headers={**headers, "Content-Type": "application/json"}, content=body
++    )
++    assert response.status_code == 422
++    assert response.json() == {"detail": "Invalid act one request"}
++    assert stored_state(engine, session_id) == before
+--- a/docs/tasks/IPO-019/report.md
++++ b/docs/tasks/IPO-019/report.md
+@@ -1,124 +1,233 @@
+ # IPO-019 — Implementation Report
+ 
+ **Status:** DONE
+ 
+ ## What was implemented
+ 
+ - Добавлен независимый модуль `backend/app/pnl.py`: неизменяемые dataclass
+   `PnlInputs` и `PnlResult`, чистая функция `calculate_act_pnl`.
+ - Серверные константы себестоимости заказа и расходов на бизнес заданы для всех
+   семи актов. ARPC, выручка, CoGS, операционные расходы, финансовый результат и
+   баланс после результата рассчитываются по формулам brief и исходного Excel.
+ - Реклама вычитается один раз и не включается в Operating Costs. Клиенты, ФОТ
+   и рекламный бюджет поступают готовыми; правила расчёта клиентской базы,
+   кредитования и банкротства не добавлялись.
+ - На входе проверяются типы и значения: целые акт 1–7 и неотрицательные клиенты
+   без `bool`; конечные `Decimal`, неотрицательные кроме начального баланса.
+   Неверный тип даёт `TypeError`, неверное значение — `ValueError`.
+ - Все выходные величины — `Decimal`. Преобразования во float и округления до
+   копеек нет, вычисления используют действующий контекст Decimal.
+ - Добавлены тесты и раздел «Расчёт P&L» в `backend/README.md`.
+ 
+ Прочитаны brief, сохранённые инструкции роли `ipo-python-implementer`, индекс
+ проекта, итоги встречи 22 октября, «Работа с агентами IPO», «Метрики и формулы
+ IPO», «Неоднозначности правил IPO», «Проверка расчётов IPO» и соответствующие
+ строки полного извлечения Excel. Использованы формулы `8 PnL` строк 5, 7–9,
+ 14–16 и `8 Итоги финансов после акта` строки 2. Ручные 105 клиентов акта 2
+ сохранены только как вход соответствующего примера Excel; расчёт этого числа
+ не реализован.
+ 
+ ## Tests and results
+ 
+ Среда: Python 3.12, существующий `backend/.venv`; все команды ниже выполнялись
+ из `backend`. Существующие тесты и настройки окружения не изменялись.
+ 
+ 1. `.venv/bin/python -m pytest tests/test_pnl.py -q`
+ 
+    ```text
+    112 passed in 0.06s
+    ```
+ 
+ 2. После форматирования:
+    `.venv/bin/python -m pytest tests/test_pnl.py tests/test_act_one_baseline.py -q`
+ 
+    ```text
+    115 passed in 0.08s
+    ```
+ 
+ 3. `.venv/bin/python -m ruff check .`
+ 
+    ```text
+    All checks passed!
+    ```
+ 
+ 4. `.venv/bin/python -m ruff format --check .`
+ 
+    ```text
+    29 files already formatted
+    ```
+ 
+ Покрыты все три примера Excel, константы и арифметика каждого акта, нулевые
+ клиенты, нулевые денежные входы и покупки, отдельный однократный вычет рекламы,
+ дробные значения без округления до копеек, положительный и отрицательный
+ финансовый результат, отрицательный начальный и конечный баланс,
+ детерминированность и неизменяемость входа/выхода. Параметризованные проверки
+ покрывают неверные типы каждого поля, `bool`, нечисловые и бесконечные Decimal,
+ отрицательные входы и границы номера акта.
+ 
+ Полный suite выполнил контроллер с выделенной PostgreSQL 17, из `backend`:
+ 
+ ```text
+ env TEST_DATABASE_URL=postgresql+psycopg://ipo_test_runner@127.0.0.1:55439/ipo_act_one_test .venv/bin/python -m pytest -q --tb=short
+ 238 passed in 8.95s
+ ```
+ 
+ Exit code 0, предупреждений нет. Первый запуск контроллера внутри sandbox дал
+ `140 passed, 98 errors`: интеграционные тесты не смогли подключиться к localhost
+ из-за `Operation not permitted`. Повтор с escalated-доступом прошёл полностью.
+ P&L сам не обращается к БД, его focused-тесты БД не требуют.
+ 
+ Полный прогон выполнен **до** механического переименования публичной функции
+ в `calculate_act_pnl` по актуальной сигнатуре brief. После переименования
+ исполнитель проверил окончательный снимок повторно:
+ 
+ ```text
+ .venv/bin/python -m pytest tests/test_pnl.py tests/test_act_one_baseline.py -q
+ 115 passed in 0.08s
+ 
+ .venv/bin/python -m ruff check .
+ All checks passed!
+ 
+ .venv/bin/python -m ruff format --check .
+ 29 files already formatted
+ ```
+ 
+ Изменены только имя функции, импорт/вызовы в тестах и упоминания в документации;
+ формулы и валидация при переименовании не менялись.
+ 
+ ## TDD Evidence
+ 
+ TDD в brief не требовался. RED-проход не выполнялся; результаты GREEN указаны
+ выше.
+ 
+ ## Files changed
+ 
+ - `backend/app/pnl.py` — новый модуль расчёта и валидации P&L.
+ - `backend/tests/test_pnl.py` — новые тесты расчёта и валидации.
+ - `backend/README.md` — добавлен раздел «Расчёт P&L».
+ - `docs/tasks/IPO-019/report.md` — этот отчёт.
+ 
+ ## Self-review findings
+ 
+ Перечитаны итоговые файлы и добавленный раздел README, проверены соответствие
+ формулам источника, наличие всех выходных полей и констант, однократный вычет
+ рекламы, порядок валидации нечисловых Decimal до сравнения с нулём и отсутствие
+ мутации входа. Все обязательные случаи brief покрыты. Замечаний к корректности
+ не осталось. Чужие файлы не менялись; Git-операции и запуск субагентов
+ исполнителем не выполнялись.
+ 
+ ## Issues or concerns
+ 
+ Вопросов к корректности по согласованному brief нет. Независимое ревью ещё не
+ выполнено; коммит выполняет контроллер после одобрения. Новые игровые допущения
+ не вводились. Единственная применяемая точность — текущий контекст Decimal,
+ без дополнительного правила валютного округления.
++
++---
++
++## Продолжение 16 ноября — API предпросмотра
++
++**Status:** DONE
++
++### What you implemented
++
++- Добавлен `POST /sessions/{session_id}/acts/1/pnl/preview`, доступный
++  участнику cfo своей сессии. Общий reader получает авторизацию, роль,
++  фазу и состояние одним SELECT; роль проверяется до фазы. GET IPO-017
++  сохраняет один SELECT. Общая actor-query используется также покупкой.
++- `PnlPreviewInputs` требует семь полей из дополнения brief и запрещает
++  дополнительные. clients — strict int>=0; финансовые поля — конечные
++  Decimal>=0, допускаются JSON-числа или строки.
++- Сервер использует акт1 и сохранённый баланс, вызывает существующий
++  `calculate_act_pnl` и возвращает все восемь полей результата строковыми
++  Decimal. Preview не записывает результат и не меняет состояние/фазу/RNG.
++  DecimalException, включая Overflow, даёт безопасный 422.
++- В main.safe_validation добавлены только новые POST-команды start, hiring
++  и preview. Их ошибки возвращают безопасный общий 422 без отражения input.
++  Причина расширения: контроллер воспроизвёл на before019 конкретный дефект —
++  сырой `NaN` в лишнем поле пустой команды вызывал 500, поскольку стандартный
++  validation handler пытался сериализовать нечисловой float. Теперь
++  `{"roll":NaN}` для start и `{"cost":Infinity}` для hiring дают 422;
++  оба случая закреплены HTTP-регрессионными тестами. Старые API не менялись.
++- README дополнен явным контрактом preview, входами, ответом и ошибками.
++
++`backend/app/pnl.py` и `backend/tests/test_pnl.py` побайтно совпадают со снимком
++`/private/tmp/ipo-team-review-snapshots/IPO-019/before`: формулы, исходная
++валидация и одобренные pure-тесты не менялись. История отчёта выше сохранена.
++
++### What you tested and test results
++
++Рабочая папка:
++`/private/tmp/ipo-team-implementation-egw7qray/backend`.
++Python:
++`/Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python`.
++
++Исполнитель выполнил до freeze без PostgreSQL:
++
++```text
++python -m pytest tests/test_act_one_pnl.py --collect-only -q
++93 tests collected in 0.05s
++
++python -m pytest tests/test_act_one_pnl.py -k validation -q
++82 passed, 11 deselected in 0.23s
++
++python -m pytest tests/test_pnl.py tests/test_health.py tests/test_act_one_baseline.py tests/test_starting_bonus.py -q
++160 passed in 0.07s
++
++python -m ruff check .
++All checks passed!
++
++python -m ruff format --check .
++39 files already formatted
++```
++
++Контроллер выполнил полный замороженный suite на выделенной настоящей
++PostgreSQL с require_escalated для localhost:
++
++```text
++env TEST_DATABASE_URL=postgresql+psycopg://ipo_test_runner@127.0.0.1:55439/ipo_act_one_test /Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python -m pytest -q --tb=short
++457 passed in 31.31s
++exit 0, без предупреждений
++```
++
++Результат передан контроллером. Исполнитель не подключался к PostgreSQL
++из sandbox; код и тесты после freeze не менялись.
++
++93 новых кейса покрывают пример Excel1, строковые Decimal и JSON-числа,
++использование сохранённого баланса без округления, повторы и отсутствие
++мутаций/RNG; cfo/другие роли/капитана/участника без роли/чужую сессию/admin/
++неизвестный UUID, auth/role до фазы и отсутствующее состояние; один SELECT
++без записей; обязательные/лишние поля, строгий clients, каждый финансовый
++вход с отрицательным/неконечным/неверным значением, malformed JSON, сырой
++NaN/Infinity/слишком большой JSON-float; Decimal Overflow→422, БД503 без
++утечек, два регрессионных теста пустых команд.
++
++### TDD Evidence
++
++TDD дополнение brief не требовало. Конкретный прежний 500 воспроизведён
++контроллером на before019; итоговые регрессионные кейсы входят в полный
++прошедший suite. Pure-история RED/GREEN выше не изменялась.
++
++### Files changed
++
++- `backend/app/act_one.py` — общий авторизованный reader с ролью и preview.
++- `backend/app/act_one_api.py` — новый маршрут.
++- `backend/app/act_one_schemas.py` — входы/результат preview.
++- `backend/app/main.py` — безопасная валидация только новых POST-команд.
++- `backend/tests/test_act_one_pnl.py` — 93 кейса.
++- `backend/README.md` — контракт preview.
++- `docs/tasks/IPO-019/report.md` — это дополнение.
++
++### Self-review findings
++
++Просмотрен diff относительно before019 и полный новый тестовый файл.
++Проверены общий actor-query без копирования больших блоков, авторизация/роль
++до фазы, согласованный снимок одним SELECT, сохранение GET single SELECT,
++серверные act/balance, отсутствие записи/RNG, Decimal-ошибки и ограничение
++handler тремя новыми командами. Проверено побайтовое равенство pure-файлов.
++Замечаний нет. Предыдущие отчёты и чужие изменения сохранены.
++
++### Any issues or concerns
++
++Нет. Готово к независимому ревью; коммит выполняет контроллер после одобрения.
++Коммиты не создавались.

@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
+from app.act_one_api import router as act_one_router
 from app.auth import login_token, require_admin, unauthorized
 from app.database import create_database_engine, transaction
 from app.models import GameSession, Participant, RoleAssignment
@@ -272,6 +273,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(act_one_router)
 participant_bearer = HTTPBearer(auto_error=False)
 
 
@@ -283,6 +285,15 @@ async def safe_validation(
     if request.url.path == "/auth/login":
         return JSONResponse(
             status_code=422, content={"detail": "Invalid login request"}
+        )
+    route = request.scope.get("route")
+    if getattr(route, "path", None) in {
+        "/sessions/{session_id}/acts/1/start",
+        "/sessions/{session_id}/acts/1/hiring/upgrade",
+        "/sessions/{session_id}/acts/1/pnl/preview",
+    }:
+        return JSONResponse(
+            status_code=422, content={"detail": "Invalid act one request"}
         )
     return await request_validation_exception_handler(request, exc)
 

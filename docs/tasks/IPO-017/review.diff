@@ -1,0 +1,1040 @@
+IPO-017: complete working-copy change packet
+Base snapshot: e696c7730e5e45151549af2f8d8ed4c8ed27949eb4b506b81e4adbe990f2d84d
+Head snapshot: 818b1550b9f335b4d2c432d0b05a16da4b16b88eca7d9d2f71b99ce3d575826c
+Changed files: 5
+
+SHA-256:
+{
+  "backend/README.md": "8e9cdcf376dc40d7e6bf0a414a033946d7d61247ef2ad575c04d3658356d7c03",
+  "backend/app/act_one.py": "281554c627f1f7969eea48c90f9571e49053c68b46352887c87b5914596fa317",
+  "backend/app/act_one_api.py": "836be1412f47479c36d5c11f16903f9f8a4a7f48a0951982b7a33cdf773e1703",
+  "backend/tests/test_act_one_snapshot.py": "c6c5af829eb0d79e688c6b6f8f45979ddeb62704296ff74bc7b0d8ae554a7d51",
+  "docs/tasks/IPO-017/report.md": "23d4c93a76e00974f927a1c5a07ee3e985b68a71009349af64d354f0e288bc4a"
+}
+
+Full-context diff:
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -1,481 +1,496 @@
+ # IPO backend
+ 
+ HTTP-сервис и постоянное хранение игровых сессий в PostgreSQL через SQLAlchemy,
+ psycopg и Alembic. `/health` подтверждает только ответ HTTP-процесса.
+ 
+ Проверено в Windows PowerShell на Python 3.12.10. Нужен установленный Python 3.12.
+ Команды ниже выполняются из папки `backend`.
+ 
+ ## Окружение и зависимости
+ 
+ В примере указан проверенный путь Python из Microsoft Store. Если Python 3.12
+ установлен иначе, задайте в `$python312` полный путь к своему `python.exe`.
+ 
+ ```powershell
+ $python312 = "$env:LOCALAPPDATA\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\python.exe"
+ & $python312 --version
+ $venv = ".venv"
+ & $python312 -m venv $venv
+ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+ & "$venv\Scripts\Activate.ps1"
+ python --version
+ python -m pip install -r requirements.txt
+ ```
+ 
+ Политика RemoteSigned применяется только к текущему процессу PowerShell и позволяет
+ активировать локально созданную среду. После закрытия окна она не сохраняется.
+ 
+ Для разработки дополнительно установите тесты и Ruff:
+ 
+ ```powershell
+ python -m pip install -r requirements-dev.txt
+ ```
+ 
+ Версии прямых зависимостей закреплены. WebSocket лобби проверен на Python 3.12.5,
+ Uvicorn 0.54.0 и websockets 17.4.
+ Starlette 0.52.1 и AnyIO 4.9.0 также закреплены для совместимости TestClient
+ с HTTPX 0.28.1 без предупреждений об устаревшем API.
+ Для повторной проверки в чистой среде используйте `$venv = ".venv-readme"`
+ вместо `.venv` в блоке создания окружения, затем выполните остальные команды.
+ 
+ ## Запуск
+ 
+ В терминале с активированным окружением:
+ 
+ ```powershell
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ Во втором окне PowerShell:
+ 
+ ```powershell
+ $response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health
+ $response.StatusCode
+ $response.Headers['Content-Type']
+ $response.Content
+ ```
+ 
+ Ожидается `200`, `application/json` и ровно `{"status":"ok"}`.
+ Повторный запрос возвращает тот же ответ. Аккаунт, БД и секретные переменные
+ не требуются. Остановка сервера: `Ctrl+C`.
+ 
+ ## Проверки
+ 
+ Из `backend` с активированным окружением:
+ 
+ Перед полным запуском подготовьте отдельную пустую тестовую БД и задайте
+ `TEST_DATABASE_URL` по инструкции ниже. Отсутствующая настройка приводит к ошибке
+ интеграционных тестов, а не к их пропуску.
+ 
+ ```powershell
+ python -m pytest
+ python -m ruff check .
+ python -m ruff format --check .
+ ```
+ 
+ `tests/test_end_to_end_scenario.py` проверяет полный сценарий IPO-009 на настоящей
+ PostgreSQL: администратор создаёт две сессии, несколько независимых HTTP/WebSocket
+ клиентов присоединяются, после обновления клиента личность восстанавливается по
+ сохранённому credential, затем администратор запускает подготовку. Проверяются
+ снимки и обновления WebSocket, сохранённый статус и участники, а также изоляция
+ сессий и credential. Репозиторий не содержит frontend, поэтому эти автоматические
+ HTTP/WebSocket-клиенты моделируют отдельные браузеры; проверка настоящего браузерного
+ интерфейса не выполняется. Отдельный запуск из `backend`:
+ 
+ ```powershell
+ python -m pytest tests/test_end_to_end_scenario.py
+ ```
+ 
+ Успешный результат — `1 passed`, HTTP `201` при создании/входе, идентичность
+ с прежним ID после «обновления», снимки и обновления WebSocket с ID только своей
+ сессии при запуске подготовки в обеих сессиях, а также соответствующие участники
+ и статусы в PostgreSQL. Полный `python -m pytest` дополнительно выполняет остальные
+ backend-тесты.
+ 
+ Выход из окружения: `deactivate`.
+ 
+ ## Локальная PostgreSQL
+ 
+ Нужен PostgreSQL 13+ (`gen_random_uuid()` доступна без расширений). Проверено на
+ Windows, PostgreSQL 18.3 и Python 3.12.10. Docker не требуется. Установите PostgreSQL
+ с официального сайта, если его ещё нет. Следующий пример создаёт **новый** локальный
+ кластер; не указывайте каталог существующего кластера. Команды из `backend`:
+ 
+ ```powershell
+ $pgBin = 'C:\Program Files\PostgreSQL\18\bin'
+ $pgData = Join-Path $env:LOCALAPPDATA 'ipo-local-postgres'
+ if (Test-Path $pgData) { throw 'Выберите новый каталог для кластера' }
+ & "$pgBin\initdb.exe" -D $pgData -U ipo -A scram-sha-256 --pwprompt --encoding=UTF8 --locale=C
+ & "$pgBin\pg_ctl.exe" -D $pgData -l "$pgData\server.log" -o '-h 127.0.0.1 -p 55432' -w start
+ & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55432 -U ipo -W ipo
+ & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55432 -U ipo -W ipo_test
+ ```
+ 
+ `--pwprompt` задаёт пароль интерактивно, `-W` запрашивает его для создания БД.
+ Если порт занят, выберите свободный и измените его во всех командах и URL.
+ При наличии своей PostgreSQL достаточно создать две отдельные базы с правами
+ на создание таблиц; настройку существующих служб менять не нужно.
+ 
+ `.env.example` содержит только вымышленные настройки. Файлы `.env` автоматически
+ не загружаются. Задайте переменные в текущем PowerShell. Следующий вариант запрашивает
+ пароль без отображения и кодирует специальные символы для URL:
+ 
+ ```powershell
+ $credential = Get-Credential -UserName ipo -Message 'Пароль локальной PostgreSQL'
+ $dbPassword = [Uri]::EscapeDataString($credential.GetNetworkCredential().Password)
+ $env:DATABASE_URL = "postgresql+psycopg://ipo:${dbPassword}@127.0.0.1:55432/ipo"
+ $env:TEST_DATABASE_URL = "postgresql+psycopg://ipo:${dbPassword}@127.0.0.1:55432/ipo_test"
+ Remove-Variable dbPassword, credential
+ python -m alembic upgrade head
+ python -m alembic upgrade head
+ python -m pytest
+ python -m ruff check .
+ python -m ruff format --check .
+ ```
+ 
+ Не выводите переменные с URL и не сохраняйте настоящие пароли в коде или Git.
+ Миграции читают `DATABASE_URL`. Приложение не создаёт таблицы при запуске.
+ Alembic можно откатить командой `python -m alembic downgrade base`; она удаляет
+ `game_sessions` вместе с её данными, поэтому используйте её только намеренно.
+ 
+ Тесты читают **только явно заданную** `TEST_DATABASE_URL`; имя базы должно
+ заканчиваться на `_test`, база должна отличаться от `DATABASE_URL`, её схема `public`
+ должна быть пустой. Тесты откажутся менять непустую схему. Они применяют миграцию
+ дважды, создают данные и в конце удаляют только созданные ими таблицы откатом
+ миграции и удалением `alembic_version`. Используйте выделенную БД без других
+ пользователей/параллельных запусков. После аварийного прерывания проверьте остатки
+ вручную или создайте новую пустую тестовую БД; автоматического сброса чужих данных нет.
+ Только HTTP-проверку можно выполнить без БД: `python -m pytest tests/test_health.py`.
+ 
+ Остановка созданного кластера (из того же окна PowerShell):
+ 
+ ```powershell
+ & "$pgBin\pg_ctl.exe" -D $pgData -m fast -w stop
+ ```
+ 
+ ## Использование хранения и ограничения модели
+ 
+ `create_database_engine()` из `app.database` читает `DATABASE_URL` при вызове,
+ не при импорте HTTP-приложения. Владелец engine освобождает пул через `dispose()`.
+ `with transaction(engine) as session:` открывает ORM-сессию, фиксирует успешную
+ операцию, откатывает исключение и закрывает сессию. Внутри можно вызвать
+ `session.add(GameSession(name="Команда"))` из `app.models`.
+ 
+ Одна сессия соответствует одной команде. PostgreSQL генерирует UUID и время
+ `TIMESTAMP WITH TIME ZONE`; обязательность всех полей и уникальность UUID
+ защищены БД. Названия могут повторяться. CHECK-ограничение `ck_game_sessions_name_length`
+ ограничивает текстовое поле 255 символами; API дополнительно удаляет пробелы
+ по краям и отклоняет пустое название. Миграция `0002_session_name_length`
+ проверяет существующие данные и откажется применяться при названиях длиннее 255;
+ она не обрезает и не удаляет их. Такие данные нужно согласованно исправить
+ перед повторным применением миграции.
+ Статус хранится текстом с начальным значением `lobby`; администратор может
+ перевести сессию в `preparation` через API. Ограничение на набор статусов
+ в БД не вводится.
+ Участники хранятся отдельно в `participants` и связаны с сессией через внешний ключ.
+ Миграция `0003_participants` добавляет эту таблицу; отображаемые имена не уникальны.
+ 
+ Документация: [SQLAlchemy + psycopg](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg),
+ [Alembic](https://alembic.sqlalchemy.org/en/latest/tutorial.html).
+ 
+ 
+ ## Создание сессии через API
+ 
+ Endpoint требует Bearer-токен администратора. Перед запросом задайте `DATABASE_URL` и примените
+ `python -m alembic upgrade head`, как описано выше. Затем запустите сервер.
+ В этом же окне сначала настройте администратора по следующему разделу.
+ 
+ ```powershell
+ $body = @{ name = '  Команда 1  ' } | ConvertTo-Json
+ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/sessions `
+     -Headers @{ Authorization = "Bearer $($login.access_token)" } `
+     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ ```
+ 
+ Ожидается `201 Created` и JSON с `id` (UUID), `name` (`Команда 1`),
+ `status` (`lobby`) и `created_at` (ISO 8601 с часовым поясом). Допустимо
+ 1–255 символов после удаления пробельных символов по краям. Одинаковые названия
+ создают разные UUID. Пустое, слишком длинное или отсутствующее название,
+ нестроковое значение и дополнительные поля (в том числе `id`, `status`,
+ `created_at`) возвращают `422` без записи.
+ 
+ Ответ создаётся из серверных defaults после `flush` и возвращается только после
+ успешного commit. При ошибке подключения, записи или commit возвращается `503`
+ с `{"detail":"Session creation unavailable"}` без SQL, DSN и traceback.
+ ORM-сессия закрывается, engine освобождается после каждого запроса.
+ `/health` продолжает работать независимо от настройки и доступности БД.
+ 
+ `python -m pytest tests/test_sessions.py` проверяет API на настоящей выделенной
+ PostgreSQL с теми же требованиями к `TEST_DATABASE_URL`, что и полный набор.
+ В том числе тесты читают запись через новый engine после ответа, вызывают
+ реальную ошибку записи и отложенную до commit ошибку PostgreSQL и проверяют откат.
+ 
+ ## Начало подготовки сессии
+ 
+ Только администратор с действующим Bearer-токеном может начать подготовку:
+ 
+ ```powershell
+ Invoke-RestMethod -Method Post `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/preparation/start" `
+     -Headers @{ Authorization = "Bearer $($login.access_token)" }
+ ```
+ 
+ Для статуса `lobby` endpoint возвращает `200` и состояние сессии со статусом
+ `preparation`. Подписанные WebSocket-клиенты получают обновлённый снимок лобби;
+ HTTP-снимок лобби также показывает новый статус. Повторный запрос возвращает
+ тот же текущий статус без повторного изменения; он также повторно публикует
+ актуальный снимок, чтобы восстановить уведомление после временной ошибки.
+ Подписчики могут получить тот же снимок повторно. Неизвестный UUID возвращает
+ `404`, неверная или отсутствующая авторизация — `401`. Параллельные запросы
+ сериализуются блокировкой строки в PostgreSQL.
+ 
+ ## Снимок подготовки
+ 
+ `GET /sessions/{session_id}/preparation` требует `Authorization: Bearer <participant_credential>`
+ участника указанной сессии. При статусе `preparation` ответ `200` содержит `id` (UUID),
+ `name`, `status` (`preparation`), `participants` (список объектов с `id` и
+ `display_name` в порядке присоединения), `captain_participant_id` (UUID или `null`)
+ и объект `roles` с четырьмя обязательными полями `cto`, `cmo`, `people`, `cfo`.
+ Каждое поле роли содержит UUID её владельца или `null`. ID капитана и владельцев
+ ролей ссылаются на записи из `participants` этого же снимка. При повторном подключении
+ запрос с сохранённым credential возвращает актуальные сохранённые назначения.
+ 
+ Отсутствующий, недействительный или выданный для другой сессии credential даёт
+ `401` с `WWW-Authenticate: Bearer`. Для неизвестного UUID сессии ответ также `401`.
+ С действующим credential своей сессии запрос на любом этапе, кроме `preparation`,
+ включая `lobby`, даёт `409` с `{"detail":"Session is not in preparation"}`.
+ 
+ ## Вход участника в сессию
+ 
+ Участник присоединяется по UUID приглашённой сессии; отдельный публичный список
+ сессий и дополнительные права для участника в этом API не вводятся. Имя является
+ только отображаемой подписью: совпадающие имена создают разные записи с разными
+ ID и учётными данными и не дают доступа к чужой записи.
+ 
+ ```powershell
+ $sessionId = 'UUID сессии из приглашения'
+ $body = @{ display_name = 'Аналитик' } | ConvertTo-Json
+ $participant = Invoke-RestMethod -Method Post `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants" `
+     -ContentType 'application/json; charset=utf-8' `
+     -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ # Не выводите participant_credential; сохраните его на клиенте для восстановления.
+ ```
+ 
+ `POST /sessions/{session_id}/participants` принимает `display_name` длиной
+ 1–255 символов после обрезки пробелов и возвращает `201` с `id`,
+ `display_name`, случайным `participant_credential` и `token_type="bearer"`.
+ Секрет показывается только при присоединении. Сервер хранит только SHA-256 digest
+ случайного токена, не сам bearer credential. Клиенту необходимо сохранить его
+ в собственном защищённом хранилище, чтобы восстановить личность после обновления
+ страницы или переподключения.
+ 
+ Для восстановления клиент передаёт этот credential как Bearer-токен:
+ 
+ ```powershell
+ $identity = Invoke-RestMethod -Method Get `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants/me" `
+     -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+ ```
+ 
+ `GET /sessions/{session_id}/participants/me` возвращает ID, отображаемое имя и
+ время создания; credential в этом ответе отсутствует. Неверный, отсутствующий
+ или относящийся к другой сессии credential даёт `401`; неизвестная сессия при
+ присоединении даёт `404`. Невалидное имя даёт `422`, недоступность БД —
+ санитизированный `503`. Идентичность определяется только случайным credential,
+ а не именем.
+ 
+ Авторизованный участник получает актуальный снимок лобби обычным HTTP-запросом:
+ 
+ ```powershell
+ $lobby = Invoke-RestMethod -Method Get `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/lobby" `
+     -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+ ```
+ 
+ `GET /sessions/{session_id}/lobby` возвращает ID и имя сессии, её текущий статус,
+ а также ID и отображаемое имя всех её участников. Credential нужен в Bearer
+ заголовке, но credential и его digest в ответ не включаются. Неизвестная сессия
+ даёт `404`; отсутствующий, неверный или относящийся к другой сессии credential —
+ `401`. Это разовый HTTP-снимок; новый запрос после переподключения получает
+ актуальный список.
+ 
+ ## WebSocket лобби
+ 
+ Установите зависимости через `python -m pip install -r requirements.txt`.
+ Uvicorn автоматически выбирает установленный `websockets`. Подготовьте БД и
+ настройте администратора по разделам [«Локальная PostgreSQL»](#локальная-postgresql)
+ и [«Вход администратора»](#вход-администратора), затем запустите из `backend`:
+ 
+ ```powershell
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ Подключайтесь к `/sessions/{session_id}/lobby/ws`. При соединении сервер отправляет
+ такой же снимок, как HTTP endpoint, а после присоединения нового участника рассылает
+ обновлённый снимок всем подключённым участникам этой сессии. Переподключение
+ также сразу возвращает актуальное состояние. Доступ остаётся ограничен ID
+ сессии; неверный или выданный для другой сессии credential отклоняется до
+ принятия WebSocket-соединения.
+ 
+ Для авторизации при handshake передайте `Authorization: Bearer <credential>`
+ или предложите subprotocol `ipo-participant.<credential>`. С действительным
+ credential в subprotocol сервер отвечает `101` без согласованного subprotocol.
+ Этот способ проверен Python-клиентом `websockets` в
+ [сетевом сценарии](#проверка-через-uvicorn).
+ 
+ Встроенный браузерный `WebSocket` не позволяет задать заголовок `Authorization`.
+ При предложенном subprotocol браузер отклоняет ответ `101` без заголовка
+ `Sec-WebSocket-Protocol`. Поэтому авторизованное подключение через браузерный
+ `WebSocket` с текущим контрактом недоступно.
+ [Стандарт WHATWG WebSockets, шаг 11.2](https://websockets.spec.whatwg.org/#concept-websocket-establish).
+ 
+ Снимок содержит только ID и отображаемые имена участников, ID, имя и статус сессии.
+ Credential и его digest в снимок не включаются. Отключение клиента удаляет его
+ из рассылки. Переход в подготовку реализован через API выше. Экономические акты
+ и пользовательский интерфейс пока не реализованы.
+ 
+ ### Проверка через Uvicorn
+ 
+ Используйте отдельную PostgreSQL БД с именем, оканчивающимся на `_test`, и
+ вымышленные учётные данные. Укажите URL этой БД в `TEST_DATABASE_URL` по примеру
+ из раздела [«Локальная PostgreSQL»](#локальная-postgresql). В отдельном PowerShell
+ из `backend` примените миграции и запустите сетевую проверку:
+ 
+ ```powershell
+ $env:DATABASE_URL = $env:TEST_DATABASE_URL
+ python -m alembic upgrade head
+ python smoke_lobby_websocket.py
+ ```
+ 
+ Клиенту достаточно `requirements.txt`. Скрипт запускает Uvicorn на свободном
+ порту `127.0.0.1`, задаёт вымышленные данные администратора и останавливает сервер
+ после проверки. Он проверяет `101`, первый снимок, рассылку при входе второго
+ участника, переподключение и `403` для чужого или отсутствующего credential.
+ Сессии и участники остаются в проверочной БД. Для `pytest` используйте другую
+ пустую БД `*_test`.
+ 
+ `python -m pytest tests/test_participants.py` проверяет присоединение,
+ восстановление после нового HTTP-клиента, отдельные идентичности при совпадающих
+ именах, изоляцию по сессии, ошибки авторизации и отсутствие исходного credential
+ в PostgreSQL и в снимке лобби. `python -m pytest tests/test_lobby_websocket.py`
+ проверяет WebSocket-снимок и обновления, авторизацию handshake, переподключение,
+ отключение и отсутствие credential/digest в payload.
+ 
+ ## Вход администратора
+ 
+ В предварительной модели есть один администратор из окружения, без таблицы
+ пользователей, регистрации, refresh-токенов и интерфейса входа. Используются
+ PyJWT 2.10.1 и argon2-cffi 25.1.0. Argon2 — рекомендуемый алгоритм в
+ [официальном руководстве FastAPI](https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/).
+ Готовая библиотека Argon2 проверяет хеш; криптография приложения не реализуется.
+ 
+ В окне запуска сервера задайте три переменные. Пароль вводится без отображения,
+ хеш и случайный ключ передаются из дочернего Python в переменные PowerShell
+ без вывода в консоль. Не сохраняйте эти значения в репозитории или истории команд:
+ 
+ ```powershell
+ $env:ADMIN_USERNAME = Read-Host 'Логин администратора'
+ $env:ADMIN_PASSWORD_HASH = python -c "from getpass import getpass; from argon2 import PasswordHasher; p=getpass('Admin password: '); assert p, 'Password must not be empty'; print(PasswordHasher().hash(p))"
+ $env:JWT_SIGNING_KEY = python -c "import secrets; print(secrets.token_urlsafe(48))"
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ `ADMIN_USERNAME` — непустая строка; `ADMIN_PASSWORD_HASH` — корректный Argon2-хеш
+ непустого пароля; `JWT_SIGNING_KEY` — случайный секрет минимум 32 байта UTF-8
+ (проверка длины не доказывает случайность, используйте генератор выше).
+ Переменные читаются при запросе, `.env` автоматически не загружается.
+ При отсутствующей или испорченной настройке вход и защищённый доступ дают `401`.
+ Ключа по умолчанию нет. `/health` не требует этих настроек и не обращается к БД.
+ 
+ Во втором окне выполните JSON-вход, затем команду создания сессии выше:
+ 
+ ```powershell
+ $credential = Get-Credential -Message 'Администратор IPO'
+ $body = @{ username = $credential.UserName; password = $credential.GetNetworkCredential().Password } | ConvertTo-Json
+ $login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/auth/login `
+     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ Remove-Variable body, credential
+ # Не выводите access_token: используйте $login в Authorization при создании сессии.
+ ```
+ 
+ Успех входа: `200` с `access_token`, `token_type="bearer"`, `expires_in=1800`.
+ JWT содержит только логин в `sub` и срок в `exp`; содержимое JWT доступно читателю
+ токена, пароль и хеш туда не включаются. Подпись HS256 фиксирована сервером;
+ `sub` и `exp` обязательны, `sub` должен совпадать с настроенным администратором.
+ Неверный логин или пароль дают одинаковый `401 {"detail":"Invalid credentials"}`.
+ Некорректное тело входа даёт `422 {"detail":"Invalid login request"}` без отражения
+ введённых данных. Отсутствующий, просроченный, подменённый или некорректный Bearer
+ даёт `401` до обращения к БД и создания записи. После истечения 30 минут войдите
+ повторно. Смена ключа аннулирует прежние токены; смена пароля сама по себе их
+ не отзывает. Индивидуальный отзыв, rate limiting и аудит входов пока не реализованы.
+ Для доступа вне loopback требуется HTTPS на уровне развёртывания.
+ 
+ `python -m pytest tests/test_auth.py` проверяет вход, JWT, безопасные ошибки
+ и отказы с проверкой отсутствия записи на выделенной PostgreSQL. Полный набор
+ сохраняет прежние проверки IPO-001–003 и использует настоящий вход для API-тестов.
+ 
+ ## Расчёт P&L
+ 
+ `app.pnl.calculate_act_pnl(PnlInputs(...))` — чистый расчёт одного акта без обращения
+ к БД. Неизменяемый `PnlInputs` принимает `act_number` (целое 1–7), `clients`
+ (целое от нуля), а также `average_price`, `orders_per_client`,
+ `advertising_budget`, `marketing_payroll`, `development_payroll`,
+ `support_payroll`, `balance_at_start` как конечные `Decimal`. Все значения,
+ кроме начального баланса, должны быть неотрицательными. `bool` в целочисленных
+ полях, `float` и другие типы вместо `Decimal` отклоняются с `TypeError`;
+ недопустимые значения — с `ValueError`.
+ 
+ `PnlResult` содержит `arpc`, `gross_revenue`, `total_cogs`, `operating_costs`,
+ `result`, `balance_after_result`, а также серверные константы `unit_cogs` и
+ `business_costs`. Константы актов 1–7 взяты из строк 8 и 14 листа `8 PnL`:
+ `1; 1.1; 1.2; 1.3; 1.35; 1.4; 1.45` и `30; 45; 60; 80; 100; 120; 140`.
+ ARPC равен цене, умноженной на покупки на клиента; выручка — ARPC, умноженному
+ на клиентов; CoGS — покупкам на клиента, умноженным на клиентов и себестоимость
+ заказа. Operating Costs складывает три ФОТ и расходы на бизнес. Из выручки
+ вычитаются CoGS, реклама (ровно один раз) и Operating Costs. Финансовый результат
+ прибавляется к начальному балансу; отрицательные результат и баланс допустимы.
+ 
+ Вычисления используют Decimal без преобразования во float и без округления
+ до копеек; действует текущий контекст Decimal. Число клиентов и расходы передаются
+ готовыми: расчёт клиентской базы, ФОТ, кредитов и условия банкротства эта функция
+ не определяет. Например, входы Excel для первого акта дают ARPC `2.47`, выручку
+ `103.74`, CoGS `54.60`, Operating Costs `190`, результат `-140.86` и остаток
+ `534.14` при начальном балансе `675`.
+ 
+ Проверка без БД из `backend`: `python -m pytest tests/test_pnl.py`.
+ 
+ ## Запуск первого акта
+ 
+ `POST /sessions/{session_id}/acts/1/start` требует Bearer администратора.
+ Отправьте запрос без тела, с `{}` или `null`. Любые поля тела, включая
+ `roll`, `balance` и `action_points`, дают `422`.
+ 
+ Первый запуск доступен в `preparation`, когда назначены капитан и все четыре
+ роли `cto`, `cmo`, `people`, `cfo`. Сервер сохраняет один бросок d10, состояние
+ акта и статус `act_one` в общей транзакции. При старте доступны 675.00 денег,
+ 60 клиентов, 130 очков действий, две junior-команды, уровень найма 0,
+ вместимость 2 и три эксперимента на команду. Бонус 1 добавляет 10 очков действий,
+ бонус 9 — 10 клиентов. Остальные восемь бонусов сохраняются как доступное
+ одноразовое право; их активация пока не реализована.
+ 
+ Успех — `200` со снимком: `session_id`, `act_number=1`, `status="act_one"`,
+ `started_at` с часовым поясом, `balance` строкой Decimal, `clients`,
+ `action_points`, `hiring_level`, `hiring_capacity`,
+ `hired_development_team_grades`, `experiments_per_development_team` и
+ `starting_bonus {roll, code, description, available}`. Для бонусов 1 и 9
+ `available=false`. Credential и digest в ответ не включаются.
+ 
+ Повторный и параллельный запрос возвращает текущие сохранённые значения,
+ включая последующие покупки, без нового броска или начисления ресурсов.
+ Неизвестная сессия даёт `404`, неподходящая фаза, неготовая команда либо
+ отсутствующее состояние при статусе `act_one` — `409`. Неавторизованный запрос
+ получает `401` до доступа к БД. Сбой подключения, записи или commit даёт
+ санитизированный `503` с откатом всей транзакции.
+ 
+ После commit сервер публикует актуальный статус в WebSocket лобби. Ошибка
+ публикации сохраняет успешный HTTP-результат; повтор может обновить лобби.
+ Рассылка работает в одном процессе приложения. Миграция
+ `0006_act_one_states` добавляет отдельную таблицу состояния с каскадом при
+ удалении сессии. Проверки: `python -m pytest tests/test_act_one_start.py` на
+ выделенной PostgreSQL по инструкции выше.
++
++## Получение снимка первого акта
++
++`GET /sessions/{session_id}/acts/1` возвращает тот же `ActOneSnapshot` с
++текущими сохранёнными ресурсами, бонусом и покупками. Передайте Bearer credential
++участника этой сессии; роль не обязательна. Администраторский JWT не заменяет
++credential участника. Снимок доступен после повторного подключения и не меняет
++состояние, не бросает кубик и не начисляет ресурсы.
++
++Без/неверный/чужой credential и неизвестная сессия дают одинаковый
++`401` с `WWW-Authenticate: Bearer`. Только участник своей сессии получает `409`
++до первого акта, после него или при отсутствии сохранённого состояния.
++Авторизация, фаза и состояние читаются одним согласованным SELECT.
++Ошибки БД возвращают санитизированный `503`. Проверка на выделенной PostgreSQL:
++`python -m pytest tests/test_act_one_snapshot.py`.
+--- a/backend/app/act_one.py
++++ b/backend/app/act_one.py
+@@ -1,110 +1,140 @@
+ """Transactional first-act operations and construction of public snapshots."""
+ 
++import hashlib
+ import secrets
+ from collections.abc import Iterator
+ from contextlib import contextmanager
+ from uuid import UUID
+ 
+ from fastapi import HTTPException
+ from sqlalchemy import select
+ from sqlalchemy.exc import SQLAlchemyError
+ from sqlalchemy.orm import Session
+ 
+ from app.act_one_baseline import build_act_one_baseline
+ from app.act_one_schemas import ActOneSnapshot, StartingBonusSnapshot
++from app.auth import unauthorized
+ from app.database import create_database_engine, transaction
+-from app.models import ActOneState, GameSession, RoleAssignment
++from app.models import ActOneState, GameSession, Participant, RoleAssignment
+ from app.starting_bonus import resolve_starting_roll
+ 
+ 
+ @contextmanager
+ def act_one_transaction() -> Iterator[Session]:
+     """Own the engine and translate database failures, including failed commit."""
+     try:
+         engine = create_database_engine()
+         try:
+             with transaction(engine) as session:
+                 yield session
+         finally:
+             engine.dispose()
+     except (SQLAlchemyError, ValueError):
+         raise HTTPException(status_code=503, detail="Act one unavailable") from None
+ 
+ 
+ def locked_game(session: Session, session_id: UUID) -> GameSession:
+     """Serialize changes to a session with preparation and other act actions."""
+     game = session.scalar(
+         select(GameSession).where(GameSession.id == session_id).with_for_update()
+     )
+     if game is None:
+         raise HTTPException(status_code=404, detail="Session not found")
+     return game
+ 
+ 
+ def build_act_one_snapshot(state: ActOneState) -> ActOneSnapshot:
+     bonus = resolve_starting_roll(state.starting_roll)
+     return ActOneSnapshot(
+         session_id=state.session_id,
+         started_at=state.started_at,
+         balance=state.balance,
+         clients=state.clients,
+         action_points=state.action_points,
+         hiring_level=state.hiring_level,
+         hiring_capacity=state.hiring_capacity,
+         hired_development_team_grades=list(state.hired_development_team_grades),
+         experiments_per_development_team=state.experiments_per_development_team,
+         starting_bonus=StartingBonusSnapshot(
+             roll=bonus.roll,
+             code=bonus.code,
+             description=bonus.description,
+             available=state.starting_bonus_available,
+         ),
+     )
+ 
+ 
+ def start_act_one(session_id: UUID) -> ActOneSnapshot:
+     """Create the act once or return its current committed state on a retry."""
+     with act_one_transaction() as session:
+         game = locked_game(session, session_id)
+         state = session.get(ActOneState, session_id)
+         if game.status == "act_one":
+             if state is None:
+                 raise HTTPException(status_code=409, detail="Act one state missing")
+         elif game.status == "preparation":
+             roles = set(
+                 session.scalars(
+                     select(RoleAssignment.role_code).where(
+                         RoleAssignment.session_id == session_id
+                     )
+                 )
+             )
+             if (
+                 game.captain_participant_id is None
+                 or roles != {"cto", "cmo", "people", "cfo"}
+                 or state is not None
+             ):
+                 raise HTTPException(status_code=409, detail="Session is not ready")
+             baseline = build_act_one_baseline()
+             bonus = resolve_starting_roll(secrets.randbelow(10) + 1)
+             state = ActOneState(
+                 session_id=session_id,
+                 balance=baseline.balance,
+                 clients=baseline.clients + bonus.client_bonus,
+                 action_points=baseline.available_action_points
+                 + bonus.action_point_bonus,
+                 hiring_level=baseline.hiring_level,
+                 hiring_capacity=baseline.hiring_capacity,
+                 hired_development_team_grades=list(
+                     baseline.hired_development_team_grades
+                 ),
+                 experiments_per_development_team=baseline.experiments_per_development_team,
+                 starting_roll=bonus.roll,
+                 starting_bonus_available=bonus.deferred,
+             )
+             session.add(state)
+             game.status = "act_one"
+             session.flush()
+         else:
+             raise HTTPException(status_code=409, detail="Session cannot start act one")
+         response = build_act_one_snapshot(state)
+     return response
++
++
++def read_act_one(session_id: UUID, credential: str) -> ActOneSnapshot:
++    """Authorize membership and read the act from one PostgreSQL snapshot."""
++    digest = hashlib.sha256(credential.encode("utf-8")).hexdigest()
++    is_member = (
++        select(Participant.id)
++        .where(
++            Participant.session_id == GameSession.id,
++            Participant.credential_digest == digest,
++        )
++        .correlate(GameSession)
++        .exists()
++    )
++    statement = (
++        select(GameSession.status, ActOneState)
++        .outerjoin(ActOneState, ActOneState.session_id == GameSession.id)
++        .where(GameSession.id == session_id, is_member)
++    )
++    with act_one_transaction() as session:
++        row = session.execute(statement).one_or_none()
++        if row is None:
++            raise unauthorized()
++        status, state = row
++        if status != "act_one" or state is None:
++            raise HTTPException(status_code=409, detail="Act one is not available")
++        response = build_act_one_snapshot(state)
++    return response
+--- a/backend/app/act_one_api.py
++++ b/backend/app/act_one_api.py
+@@ -1,33 +1,51 @@
+ """HTTP routes for the first act, independent of the application module."""
+ 
+ import logging
+ from uuid import UUID
+ 
+ from fastapi import APIRouter, Depends, Request
++from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+ from starlette.concurrency import run_in_threadpool
+ 
+-from app.act_one import start_act_one
++from app.act_one import read_act_one, start_act_one
+ from app.act_one_schemas import ActOneSnapshot, StartActOneCommand
+-from app.auth import require_admin
++from app.auth import require_admin, unauthorized
+ 
+ router = APIRouter()
+ logger = logging.getLogger(__name__)
++participant_bearer = HTTPBearer(auto_error=False)
++
++
++def participant_credential(
++    credentials: HTTPAuthorizationCredentials | None = Depends(participant_bearer),
++) -> str:
++    """Require a participant Bearer before attempting any database access."""
++    if credentials is None:
++        raise unauthorized()
++    return credentials.credentials
+ 
+ 
+ @router.post(
+     "/sessions/{session_id}/acts/1/start",
+     response_model=ActOneSnapshot,
+     dependencies=[Depends(require_admin)],
+ )
+ async def start_first_act(
+     request: Request,
+     session_id: UUID,
+     payload: StartActOneCommand | None = None,
+ ) -> ActOneSnapshot:
+     response = await run_in_threadpool(start_act_one, session_id)
+     try:
+         await request.app.state.lobby_hub.publish(session_id)
+     except Exception:
+         # Persistence has already committed. A retry may republish the snapshot.
+         logger.warning("Lobby publication failed after act one start")
+     return response
++
++
++@router.get("/sessions/{session_id}/acts/1", response_model=ActOneSnapshot)
++def get_first_act(
++    session_id: UUID, credential: str = Depends(participant_credential)
++) -> ActOneSnapshot:
++    return read_act_one(session_id, credential)
+--- /dev/null
++++ b/backend/tests/test_act_one_snapshot.py
+@@ -0,0 +1,221 @@
++"""Authorize and read saved first-act snapshots on real PostgreSQL."""
++
++import hashlib
++from unittest.mock import Mock
++from uuid import UUID, uuid4
++
++import pytest
++from fastapi.testclient import TestClient
++from sqlalchemy import event
++from sqlalchemy.exc import OperationalError
++
++from app.database import create_database_engine
++from app.main import app
++from app.models import ActOneState, GameSession
++from tests.test_act_one_start import client as client
++from tests.test_act_one_start import engine as engine
++from tests.test_act_one_start import prepared_team as prepared_team
++from tests.test_act_one_start import start_path, stored_state
++from tests.test_captain import create_session, join_session
++from tests.test_roles import participant_headers
++
++
++def snapshot_path(session_id):
++    return f"/sessions/{session_id}/acts/1"
++
++
++def test_snapshot_survives_reconnect_and_reflects_saved_purchase(
++    client, engine, prepared_team
++):
++    session_id, members = prepared_team
++    # A participant without a role is entitled to the same snapshot.
++    spectator = join_session(client, session_id, "Без роли")
++    started = client.post(start_path(session_id))
++    assert started.status_code == 200
++    expected = started.json()
++    response = client.get(
++        snapshot_path(session_id), headers=participant_headers(spectator)
++    )
++    assert response.status_code == 200
++    assert response.json() == expected
++    for member in [*members, spectator]:
++        credential = member["participant_credential"]
++        assert credential not in response.text
++        assert hashlib.sha256(credential.encode()).hexdigest() not in response.text
++    assert "credential" not in response.text
++    assert "digest" not in response.text
++
++    with TestClient(app) as reconnected:
++        reconnect = reconnected.get(
++            snapshot_path(session_id), headers=participant_headers(members[0])
++        )
++        assert reconnect.status_code == 200
++        assert reconnect.json() == expected
++
++    with engine.begin() as connection:
++        connection.execute(
++            ActOneState.__table__.update()
++            .where(ActOneState.session_id == UUID(session_id))
++            .values(hiring_level=1, hiring_capacity=3, action_points=100)
++        )
++    saved_purchase = client.get(
++        snapshot_path(session_id), headers=participant_headers(spectator)
++    )
++    assert saved_purchase.status_code == 200
++    assert saved_purchase.json() == {
++        **expected,
++        "hiring_level": 1,
++        "hiring_capacity": 3,
++        "action_points": 100,
++    }
++
++
++def test_snapshot_isolates_sessions_and_authorizes_before_phase(
++    client, engine, prepared_team
++):
++    first_session, members = prepared_team
++    other_session = create_session(client)
++    outsider = join_session(client, other_session, "Другая команда")
++    assert client.post(start_path(first_session)).status_code == 200
++    first_headers = participant_headers(members[0])
++    other_headers = participant_headers(outsider)
++    with TestClient(app) as anonymous:
++        attempts = [
++            anonymous.get(snapshot_path(first_session)),
++            client.get(snapshot_path(first_session)),  # Administrator JWT.
++            anonymous.get(
++                snapshot_path(first_session),
++                headers={"Authorization": "Bearer invalid"},
++            ),
++            anonymous.get(snapshot_path(first_session), headers=other_headers),
++            anonymous.get(snapshot_path(other_session), headers=first_headers),
++            anonymous.get(snapshot_path(str(uuid4())), headers=first_headers),
++        ]
++    for denied in attempts:
++        assert denied.status_code == 401
++        assert denied.json() == {"detail": "Invalid credentials"}
++        assert denied.headers["WWW-Authenticate"] == "Bearer"
++
++    # A member can distinguish their own phase, but outsiders cannot inspect it.
++    assert (
++        client.get(snapshot_path(other_session), headers=other_headers).status_code
++        == 409
++    )
++    assert (
++        client.get(snapshot_path(first_session), headers=first_headers).status_code
++        == 200
++    )
++    with engine.begin() as connection:
++        connection.execute(
++            GameSession.__table__.update()
++            .where(GameSession.id == UUID(first_session))
++            .values(status="finished")
++        )
++    assert (
++        client.get(snapshot_path(first_session), headers=first_headers).status_code
++        == 409
++    )
++    assert (
++        client.get(snapshot_path(first_session), headers=other_headers).status_code
++        == 401
++    )
++
++
++@pytest.mark.parametrize("phase", ["preparation", "act_one"])
++def test_snapshot_with_no_state_is_conflict_only_for_a_member(
++    client, engine, prepared_team, phase
++):
++    session_id, members = prepared_team
++    with engine.begin() as connection:
++        connection.execute(
++            GameSession.__table__.update()
++            .where(GameSession.id == UUID(session_id))
++            .values(status=phase)
++        )
++    response = client.get(
++        snapshot_path(session_id), headers=participant_headers(members[0])
++    )
++    assert response.status_code == 409
++    assert stored_state(engine, session_id) is None
++    assert client.get(snapshot_path(session_id)).status_code == 401
++
++
++def test_read_uses_one_select_without_rng_or_mutations(
++    client, migrated_database, prepared_team, monkeypatch
++):
++    session_id, members = prepared_team
++    started = client.post(start_path(session_id))
++    assert started.status_code == 200
++    engine = create_database_engine(migrated_database)
++    before = stored_state(engine, session_id)
++    random = Mock(side_effect=AssertionError("Read must not roll"))
++    monkeypatch.setattr("app.act_one.secrets.randbelow", random)
++    try:
++        # Initialize the dialect before observing SQL generated by GET itself.
++        with engine.connect():
++            pass
++        statements = []
++        event.listen(
++            engine,
++            "before_cursor_execute",
++            lambda _connection, _cursor, statement, *_: statements.append(statement),
++        )
++        monkeypatch.setattr("app.act_one.create_database_engine", lambda: engine)
++        response = client.get(
++            snapshot_path(session_id), headers=participant_headers(members[0])
++        )
++        assert response.status_code == 200
++        assert response.json() == started.json()
++        assert len(statements) == 1
++        assert statements[0].lstrip().upper().startswith("SELECT ")
++        assert "EXISTS" in statements[0].upper()
++        assert "LEFT OUTER JOIN" in statements[0].upper()
++        assert "FOR UPDATE" not in statements[0].upper()
++        random.assert_not_called()
++        assert stored_state(engine, session_id) == before
++    finally:
++        engine.dispose()
++
++
++def test_missing_bearer_is_rejected_without_database(monkeypatch):
++    database = Mock(side_effect=AssertionError("Missing bearer accessed DB"))
++    monkeypatch.setattr("app.act_one.create_database_engine", database)
++    with TestClient(app) as anonymous:
++        response = anonymous.get(snapshot_path(str(uuid4())))
++    assert response.status_code == 401
++    database.assert_not_called()
++
++
++@pytest.mark.parametrize("failure", ["configuration", "connection", "query"])
++def test_snapshot_database_failure_is_sanitized(
++    client, prepared_team, engine, monkeypatch, failure
++):
++    session_id, members = prepared_team
++    assert client.post(start_path(session_id)).status_code == 200
++    if failure == "configuration":
++        monkeypatch.setattr(
++            "app.act_one.create_database_engine",
++            Mock(side_effect=ValueError("private DSN sentinel")),
++        )
++    elif failure == "connection":
++        monkeypatch.setattr(
++            "app.act_one.create_database_engine",
++            Mock(
++                side_effect=OperationalError(
++                    "private SQL", {}, Exception("private DSN")
++                )
++            ),
++        )
++    else:
++
++        def fail_query(*_args):
++            raise OperationalError("private SQL sentinel", {}, Exception("private DSN"))
++
++        event.listen(engine, "before_cursor_execute", fail_query)
++        monkeypatch.setattr("app.act_one.create_database_engine", lambda: engine)
++    response = client.get(
++        snapshot_path(session_id), headers=participant_headers(members[0])
++    )
++    assert response.status_code == 503
++    assert response.json() == {"detail": "Act one unavailable"}
++    assert "sentinel" not in response.text
+--- /dev/null
++++ b/docs/tasks/IPO-017/report.md
+@@ -0,0 +1,99 @@
++# IPO-017 — отчёт исполнителя
++
++**Status:** DONE
++
++## What you implemented
++
++- Добавлен `GET /sessions/{session_id}/acts/1` с общей схемой ActOneSnapshot
++  и существующим построителем снимка IPO-016.
++- Общая dependency `participant_credential` извлекает participant Bearer;
++  отсутствие Bearer отклоняется до БД. Администраторский JWT не заменяет
++  credential участника.
++- `read_act_one` одним SELECT читает phase и ActOneState с correlated
++  EXISTS по session-scoped digest. LEFT OUTER JOIN позволяет вернуть 409
++  участнику своей сессии до старта или при отсутствующем состоянии.
++  Без/неверный/чужой credential и неизвестная сессия дают одинаковые 401
++  с WWW-Authenticate: Bearer. Проверка фазы следует после авторизации.
++- Доступ разрешён любому участнику своей сессии, в том числе без роли.
++  Возвращается текущее сохранённое состояние с последующими покупками.
++  Чтение не меняет ресурсы и не вызывает RNG. Ошибки БД санитизируются
++  общим act_one_transaction в 503 без SQL/DSN/traceback.
++- README дополнен описанием GET и ответов.
++
++## What you tested and test results
++
++Рабочая папка:
++`/private/tmp/ipo-team-implementation-egw7qray/backend`.
++Исполняемый Python:
++`/Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python`.
++
++До freeze исполнитель выполнил:
++
++```text
++python -m pytest tests/test_act_one_snapshot.py --collect-only -q
++9 tests collected in 0.04s
++
++python -m pytest tests/test_health.py tests/test_act_one_baseline.py tests/test_starting_bonus.py -q
++48 passed in 0.06s
++
++python -m ruff check .
++All checks passed!
++
++python -m ruff format --check .
++37 files already formatted
++```
++
++После freeze полный suite выполнил контроллер с настоящей выделенной
++PostgreSQL и разрешением require_escalated для localhost:
++
++```text
++env TEST_DATABASE_URL=postgresql+psycopg://ipo_test_runner@127.0.0.1:55439/ipo_act_one_test /Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python -m pytest -q --tb=short
++337 passed in 21.04s
++exit 0, без warnings
++```
++
++Исполнитель не подключался к PostgreSQL из sandbox. Результат полного
++запуска передан контроллером; код и тесты после freeze не менялись.
++
++Девять новых проверок включены в полный suite:
++
++- Полное совпадение GET со снимком POST start, новое TestClient-подключение,
++  участник без роли, отсутствие credential/digest и их значений в ответе.
++- Прямая покупка в БД отражается новым снимком.
++- Изоляция сессий, одинаковые 401 для отсутствующего/неверного/чужого
++  credential, администраторского JWT и неизвестного UUID; WWW-Authenticate.
++- Авторизация до phase, 409 своей сессии до/после акта и при отсутствии
++  состояния в preparation/act_one.
++- Запись SQL через engine event подтверждает один SELECT, EXISTS и LEFT
++  OUTER JOIN, отсутствие FOR UPDATE/записей; RNG не вызван, состояние не меняется.
++- Отсутствующий Bearer не открывает БД; ошибки конфигурации, соединения
++  и запроса дают только санитизированный 503.
++
++Переиспользованы фикстуры client, engine, prepared_team из IPO-016.
++
++## TDD Evidence
++
++TDD brief не требовал. Код и интеграционные тесты реализованы одним срезом,
++после freeze подтверждены полным PostgreSQL suite.
++
++## Files changed
++
++- `backend/app/act_one.py` — read_act_one.
++- `backend/app/act_one_api.py` — GET и dependency participant Bearer.
++- `backend/tests/test_act_one_snapshot.py` — 9 проверок.
++- `backend/README.md` — описание GET.
++- `docs/tasks/IPO-017/report.md` — этот отчёт.
++
++## Self-review findings
++
++Просмотрен полный diff относительно
++`/private/tmp/ipo-team-review-snapshots/IPO-017/before`.
++Проверены согласованность авторизации и данных в одном SELECT, outer join
++при отсутствующем состоянии, auth до phase, общая схема и построитель,
++отсутствие мутаций/RNG, санитизация ошибок и границы задачи.
++Существующий start и отчёт IPO-016 не менялись. Замечаний нет.
++
++## Any issues or concerns
++
++Нет. Готово к независимому ревью; коммит после одобрения выполняет контроллер.
++Коммиты не создавались.

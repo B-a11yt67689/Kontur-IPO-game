@@ -1,0 +1,1120 @@
+IPO-020: complete working-copy change packet
+Base snapshot: 959762046750e1a5166fcb68485be8b1771ff2e1e585fcb92ca6d09bc7b22e2a
+Head snapshot: 9f8d2c0be6f56e7352640cc128ecfc63cd94f099fa77a6fcea143d4d57a63026
+Changed files: 3
+
+SHA-256:
+{
+  "backend/README.md": "d8494abe08603ba4211d8be3412b649f511670d60dc16c79c647834bd91399a4",
+  "backend/tests/test_act_one_end_to_end.py": "e2532dbd05b84d77f6ea37f6348c2e5dac6d91a130c4a8765f373a298bc206a0",
+  "docs/tasks/IPO-020/report.md": "bfdfe478fd98da32b009f9e7febe1ddd14b1064cf754c6501b5d60b469d7d2dc"
+}
+
+Full-context diff:
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -1,561 +1,597 @@
+ # IPO backend
+ 
+ HTTP-сервис и постоянное хранение игровых сессий в PostgreSQL через SQLAlchemy,
+ psycopg и Alembic. `/health` подтверждает только ответ HTTP-процесса.
+ 
+ Проверено в Windows PowerShell на Python 3.12.10. Нужен установленный Python 3.12.
+ Команды ниже выполняются из папки `backend`.
+ 
+ ## Окружение и зависимости
+ 
+ В примере указан проверенный путь Python из Microsoft Store. Если Python 3.12
+ установлен иначе, задайте в `$python312` полный путь к своему `python.exe`.
+ 
+ ```powershell
+ $python312 = "$env:LOCALAPPDATA\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\python.exe"
+ & $python312 --version
+ $venv = ".venv"
+ & $python312 -m venv $venv
+ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+ & "$venv\Scripts\Activate.ps1"
+ python --version
+ python -m pip install -r requirements.txt
+ ```
+ 
+ Политика RemoteSigned применяется только к текущему процессу PowerShell и позволяет
+ активировать локально созданную среду. После закрытия окна она не сохраняется.
+ 
+ Для разработки дополнительно установите тесты и Ruff:
+ 
+ ```powershell
+ python -m pip install -r requirements-dev.txt
+ ```
+ 
+ Версии прямых зависимостей закреплены. WebSocket лобби проверен на Python 3.12.5,
+ Uvicorn 0.54.0 и websockets 17.4.
+ Starlette 0.52.1 и AnyIO 4.9.0 также закреплены для совместимости TestClient
+ с HTTPX 0.28.1 без предупреждений об устаревшем API.
+ Для повторной проверки в чистой среде используйте `$venv = ".venv-readme"`
+ вместо `.venv` в блоке создания окружения, затем выполните остальные команды.
+ 
+ ## Запуск
+ 
+ В терминале с активированным окружением:
+ 
+ ```powershell
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ Во втором окне PowerShell:
+ 
+ ```powershell
+ $response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health
+ $response.StatusCode
+ $response.Headers['Content-Type']
+ $response.Content
+ ```
+ 
+ Ожидается `200`, `application/json` и ровно `{"status":"ok"}`.
+ Повторный запрос возвращает тот же ответ. Аккаунт, БД и секретные переменные
+ не требуются. Остановка сервера: `Ctrl+C`.
+ 
+ ## Проверки
+ 
+ Из `backend` с активированным окружением:
+ 
+ Перед полным запуском подготовьте отдельную пустую тестовую БД и задайте
+ `TEST_DATABASE_URL` по инструкции ниже. Отсутствующая настройка приводит к ошибке
+ интеграционных тестов, а не к их пропуску.
+ 
+ ```powershell
+ python -m pytest
+ python -m ruff check .
+ python -m ruff format --check .
+ ```
+ 
+ `tests/test_end_to_end_scenario.py` проверяет полный сценарий IPO-009 на настоящей
+ PostgreSQL: администратор создаёт две сессии, несколько независимых HTTP/WebSocket
+ клиентов присоединяются, после обновления клиента личность восстанавливается по
+ сохранённому credential, затем администратор запускает подготовку. Проверяются
+ снимки и обновления WebSocket, сохранённый статус и участники, а также изоляция
+ сессий и credential. Репозиторий не содержит frontend, поэтому эти автоматические
+ HTTP/WebSocket-клиенты моделируют отдельные браузеры; проверка настоящего браузерного
+ интерфейса не выполняется. Отдельный запуск из `backend`:
+ 
+ ```powershell
+ python -m pytest tests/test_end_to_end_scenario.py
+ ```
+ 
+ Успешный результат — `1 passed`, HTTP `201` при создании/входе, идентичность
+ с прежним ID после «обновления», снимки и обновления WebSocket с ID только своей
+ сессии при запуске подготовки в обеих сессиях, а также соответствующие участники
+ и статусы в PostgreSQL. Полный `python -m pytest` дополнительно выполняет остальные
+ backend-тесты.
+ 
+ Выход из окружения: `deactivate`.
+ 
+ ## Локальная PostgreSQL
+ 
+ Нужен PostgreSQL 13+ (`gen_random_uuid()` доступна без расширений). Проверено на
+ Windows, PostgreSQL 18.3 и Python 3.12.10. Docker не требуется. Установите PostgreSQL
+ с официального сайта, если его ещё нет. Следующий пример создаёт **новый** локальный
+ кластер; не указывайте каталог существующего кластера. Команды из `backend`:
+ 
+ ```powershell
+ $pgBin = 'C:\Program Files\PostgreSQL\18\bin'
+ $pgData = Join-Path $env:LOCALAPPDATA 'ipo-local-postgres'
+ if (Test-Path $pgData) { throw 'Выберите новый каталог для кластера' }
+ & "$pgBin\initdb.exe" -D $pgData -U ipo -A scram-sha-256 --pwprompt --encoding=UTF8 --locale=C
+ & "$pgBin\pg_ctl.exe" -D $pgData -l "$pgData\server.log" -o '-h 127.0.0.1 -p 55432' -w start
+ & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55432 -U ipo -W ipo
+ & "$pgBin\createdb.exe" -h 127.0.0.1 -p 55432 -U ipo -W ipo_test
+ ```
+ 
+ `--pwprompt` задаёт пароль интерактивно, `-W` запрашивает его для создания БД.
+ Если порт занят, выберите свободный и измените его во всех командах и URL.
+ При наличии своей PostgreSQL достаточно создать две отдельные базы с правами
+ на создание таблиц; настройку существующих служб менять не нужно.
+ 
+ `.env.example` содержит только вымышленные настройки. Файлы `.env` автоматически
+ не загружаются. Задайте переменные в текущем PowerShell. Следующий вариант запрашивает
+ пароль без отображения и кодирует специальные символы для URL:
+ 
+ ```powershell
+ $credential = Get-Credential -UserName ipo -Message 'Пароль локальной PostgreSQL'
+ $dbPassword = [Uri]::EscapeDataString($credential.GetNetworkCredential().Password)
+ $env:DATABASE_URL = "postgresql+psycopg://ipo:${dbPassword}@127.0.0.1:55432/ipo"
+ $env:TEST_DATABASE_URL = "postgresql+psycopg://ipo:${dbPassword}@127.0.0.1:55432/ipo_test"
+ Remove-Variable dbPassword, credential
+ python -m alembic upgrade head
+ python -m alembic upgrade head
+ python -m pytest
+ python -m ruff check .
+ python -m ruff format --check .
+ ```
+ 
+ Не выводите переменные с URL и не сохраняйте настоящие пароли в коде или Git.
+ Миграции читают `DATABASE_URL`. Приложение не создаёт таблицы при запуске.
+ Alembic можно откатить командой `python -m alembic downgrade base`; она удаляет
+ `game_sessions` вместе с её данными, поэтому используйте её только намеренно.
+ 
+ Тесты читают **только явно заданную** `TEST_DATABASE_URL`; имя базы должно
+ заканчиваться на `_test`, база должна отличаться от `DATABASE_URL`, её схема `public`
+ должна быть пустой. Тесты откажутся менять непустую схему. Они применяют миграцию
+ дважды, создают данные и в конце удаляют только созданные ими таблицы откатом
+ миграции и удалением `alembic_version`. Используйте выделенную БД без других
+ пользователей/параллельных запусков. После аварийного прерывания проверьте остатки
+ вручную или создайте новую пустую тестовую БД; автоматического сброса чужих данных нет.
+ Только HTTP-проверку можно выполнить без БД: `python -m pytest tests/test_health.py`.
+ 
+ Остановка созданного кластера (из того же окна PowerShell):
+ 
+ ```powershell
+ & "$pgBin\pg_ctl.exe" -D $pgData -m fast -w stop
+ ```
+ 
+ ## Использование хранения и ограничения модели
+ 
+ `create_database_engine()` из `app.database` читает `DATABASE_URL` при вызове,
+ не при импорте HTTP-приложения. Владелец engine освобождает пул через `dispose()`.
+ `with transaction(engine) as session:` открывает ORM-сессию, фиксирует успешную
+ операцию, откатывает исключение и закрывает сессию. Внутри можно вызвать
+ `session.add(GameSession(name="Команда"))` из `app.models`.
+ 
+ Одна сессия соответствует одной команде. PostgreSQL генерирует UUID и время
+ `TIMESTAMP WITH TIME ZONE`; обязательность всех полей и уникальность UUID
+ защищены БД. Названия могут повторяться. CHECK-ограничение `ck_game_sessions_name_length`
+ ограничивает текстовое поле 255 символами; API дополнительно удаляет пробелы
+ по краям и отклоняет пустое название. Миграция `0002_session_name_length`
+ проверяет существующие данные и откажется применяться при названиях длиннее 255;
+ она не обрезает и не удаляет их. Такие данные нужно согласованно исправить
+ перед повторным применением миграции.
+ Статус хранится текстом с начальным значением `lobby`; администратор может
+ перевести сессию в `preparation` через API. Ограничение на набор статусов
+ в БД не вводится.
+ Участники хранятся отдельно в `participants` и связаны с сессией через внешний ключ.
+ Миграция `0003_participants` добавляет эту таблицу; отображаемые имена не уникальны.
+ 
+ Документация: [SQLAlchemy + psycopg](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg),
+ [Alembic](https://alembic.sqlalchemy.org/en/latest/tutorial.html).
+ 
+ 
+ ## Создание сессии через API
+ 
+ Endpoint требует Bearer-токен администратора. Перед запросом задайте `DATABASE_URL` и примените
+ `python -m alembic upgrade head`, как описано выше. Затем запустите сервер.
+ В этом же окне сначала настройте администратора по следующему разделу.
+ 
+ ```powershell
+ $body = @{ name = '  Команда 1  ' } | ConvertTo-Json
+ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/sessions `
+     -Headers @{ Authorization = "Bearer $($login.access_token)" } `
+     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ ```
+ 
+ Ожидается `201 Created` и JSON с `id` (UUID), `name` (`Команда 1`),
+ `status` (`lobby`) и `created_at` (ISO 8601 с часовым поясом). Допустимо
+ 1–255 символов после удаления пробельных символов по краям. Одинаковые названия
+ создают разные UUID. Пустое, слишком длинное или отсутствующее название,
+ нестроковое значение и дополнительные поля (в том числе `id`, `status`,
+ `created_at`) возвращают `422` без записи.
+ 
+ Ответ создаётся из серверных defaults после `flush` и возвращается только после
+ успешного commit. При ошибке подключения, записи или commit возвращается `503`
+ с `{"detail":"Session creation unavailable"}` без SQL, DSN и traceback.
+ ORM-сессия закрывается, engine освобождается после каждого запроса.
+ `/health` продолжает работать независимо от настройки и доступности БД.
+ 
+ `python -m pytest tests/test_sessions.py` проверяет API на настоящей выделенной
+ PostgreSQL с теми же требованиями к `TEST_DATABASE_URL`, что и полный набор.
+ В том числе тесты читают запись через новый engine после ответа, вызывают
+ реальную ошибку записи и отложенную до commit ошибку PostgreSQL и проверяют откат.
+ 
+ ## Начало подготовки сессии
+ 
+ Только администратор с действующим Bearer-токеном может начать подготовку:
+ 
+ ```powershell
+ Invoke-RestMethod -Method Post `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/preparation/start" `
+     -Headers @{ Authorization = "Bearer $($login.access_token)" }
+ ```
+ 
+ Для статуса `lobby` endpoint возвращает `200` и состояние сессии со статусом
+ `preparation`. Подписанные WebSocket-клиенты получают обновлённый снимок лобби;
+ HTTP-снимок лобби также показывает новый статус. Повторный запрос возвращает
+ тот же текущий статус без повторного изменения; он также повторно публикует
+ актуальный снимок, чтобы восстановить уведомление после временной ошибки.
+ Подписчики могут получить тот же снимок повторно. Неизвестный UUID возвращает
+ `404`, неверная или отсутствующая авторизация — `401`. Параллельные запросы
+ сериализуются блокировкой строки в PostgreSQL.
+ 
+ ## Снимок подготовки
+ 
+ `GET /sessions/{session_id}/preparation` требует `Authorization: Bearer <participant_credential>`
+ участника указанной сессии. При статусе `preparation` ответ `200` содержит `id` (UUID),
+ `name`, `status` (`preparation`), `participants` (список объектов с `id` и
+ `display_name` в порядке присоединения), `captain_participant_id` (UUID или `null`)
+ и объект `roles` с четырьмя обязательными полями `cto`, `cmo`, `people`, `cfo`.
+ Каждое поле роли содержит UUID её владельца или `null`. ID капитана и владельцев
+ ролей ссылаются на записи из `participants` этого же снимка. При повторном подключении
+ запрос с сохранённым credential возвращает актуальные сохранённые назначения.
+ 
+ Отсутствующий, недействительный или выданный для другой сессии credential даёт
+ `401` с `WWW-Authenticate: Bearer`. Для неизвестного UUID сессии ответ также `401`.
+ С действующим credential своей сессии запрос на любом этапе, кроме `preparation`,
+ включая `lobby`, даёт `409` с `{"detail":"Session is not in preparation"}`.
+ 
+ ## Вход участника в сессию
+ 
+ Участник присоединяется по UUID приглашённой сессии; отдельный публичный список
+ сессий и дополнительные права для участника в этом API не вводятся. Имя является
+ только отображаемой подписью: совпадающие имена создают разные записи с разными
+ ID и учётными данными и не дают доступа к чужой записи.
+ 
+ ```powershell
+ $sessionId = 'UUID сессии из приглашения'
+ $body = @{ display_name = 'Аналитик' } | ConvertTo-Json
+ $participant = Invoke-RestMethod -Method Post `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants" `
+     -ContentType 'application/json; charset=utf-8' `
+     -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ # Не выводите participant_credential; сохраните его на клиенте для восстановления.
+ ```
+ 
+ `POST /sessions/{session_id}/participants` принимает `display_name` длиной
+ 1–255 символов после обрезки пробелов и возвращает `201` с `id`,
+ `display_name`, случайным `participant_credential` и `token_type="bearer"`.
+ Секрет показывается только при присоединении. Сервер хранит только SHA-256 digest
+ случайного токена, не сам bearer credential. Клиенту необходимо сохранить его
+ в собственном защищённом хранилище, чтобы восстановить личность после обновления
+ страницы или переподключения.
+ 
+ Для восстановления клиент передаёт этот credential как Bearer-токен:
+ 
+ ```powershell
+ $identity = Invoke-RestMethod -Method Get `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/participants/me" `
+     -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+ ```
+ 
+ `GET /sessions/{session_id}/participants/me` возвращает ID, отображаемое имя и
+ время создания; credential в этом ответе отсутствует. Неверный, отсутствующий
+ или относящийся к другой сессии credential даёт `401`; неизвестная сессия при
+ присоединении даёт `404`. Невалидное имя даёт `422`, недоступность БД —
+ санитизированный `503`. Идентичность определяется только случайным credential,
+ а не именем.
+ 
+ Авторизованный участник получает актуальный снимок лобби обычным HTTP-запросом:
+ 
+ ```powershell
+ $lobby = Invoke-RestMethod -Method Get `
+     -Uri "http://127.0.0.1:8000/sessions/$sessionId/lobby" `
+     -Headers @{ Authorization = "Bearer $($participant.participant_credential)" }
+ ```
+ 
+ `GET /sessions/{session_id}/lobby` возвращает ID и имя сессии, её текущий статус,
+ а также ID и отображаемое имя всех её участников. Credential нужен в Bearer
+ заголовке, но credential и его digest в ответ не включаются. Неизвестная сессия
+ даёт `404`; отсутствующий, неверный или относящийся к другой сессии credential —
+ `401`. Это разовый HTTP-снимок; новый запрос после переподключения получает
+ актуальный список.
+ 
+ ## WebSocket лобби
+ 
+ Установите зависимости через `python -m pip install -r requirements.txt`.
+ Uvicorn автоматически выбирает установленный `websockets`. Подготовьте БД и
+ настройте администратора по разделам [«Локальная PostgreSQL»](#локальная-postgresql)
+ и [«Вход администратора»](#вход-администратора), затем запустите из `backend`:
+ 
+ ```powershell
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ Подключайтесь к `/sessions/{session_id}/lobby/ws`. При соединении сервер отправляет
+ такой же снимок, как HTTP endpoint, а после присоединения нового участника рассылает
+ обновлённый снимок всем подключённым участникам этой сессии. Переподключение
+ также сразу возвращает актуальное состояние. Доступ остаётся ограничен ID
+ сессии; неверный или выданный для другой сессии credential отклоняется до
+ принятия WebSocket-соединения.
+ 
+ Для авторизации при handshake передайте `Authorization: Bearer <credential>`
+ или предложите subprotocol `ipo-participant.<credential>`. С действительным
+ credential в subprotocol сервер отвечает `101` без согласованного subprotocol.
+ Этот способ проверен Python-клиентом `websockets` в
+ [сетевом сценарии](#проверка-через-uvicorn).
+ 
+ Встроенный браузерный `WebSocket` не позволяет задать заголовок `Authorization`.
+ При предложенном subprotocol браузер отклоняет ответ `101` без заголовка
+ `Sec-WebSocket-Protocol`. Поэтому авторизованное подключение через браузерный
+ `WebSocket` с текущим контрактом недоступно.
+ [Стандарт WHATWG WebSockets, шаг 11.2](https://websockets.spec.whatwg.org/#concept-websocket-establish).
+ 
+ Снимок содержит только ID и отображаемые имена участников, ID, имя и статус сессии.
+ Credential и его digest в снимок не включаются. Отключение клиента удаляет его
+-из рассылки. Переход в подготовку реализован через API выше. Экономические акты
+-и пользовательский интерфейс пока не реализованы.
++из рассылки. Переход в подготовку реализован через API выше. Доступен первый
++API-срез экономического акта: старт, снимок, первая покупка стратегии найма
++и предпросмотр P&L. Полный цикл актов и пользовательский интерфейс пока
++не реализованы.
+ 
+ ### Проверка через Uvicorn
+ 
+ Используйте отдельную PostgreSQL БД с именем, оканчивающимся на `_test`, и
+ вымышленные учётные данные. Укажите URL этой БД в `TEST_DATABASE_URL` по примеру
+ из раздела [«Локальная PostgreSQL»](#локальная-postgresql). В отдельном PowerShell
+ из `backend` примените миграции и запустите сетевую проверку:
+ 
+ ```powershell
+ $env:DATABASE_URL = $env:TEST_DATABASE_URL
+ python -m alembic upgrade head
+ python smoke_lobby_websocket.py
+ ```
+ 
+ Клиенту достаточно `requirements.txt`. Скрипт запускает Uvicorn на свободном
+ порту `127.0.0.1`, задаёт вымышленные данные администратора и останавливает сервер
+ после проверки. Он проверяет `101`, первый снимок, рассылку при входе второго
+ участника, переподключение и `403` для чужого или отсутствующего credential.
+ Сессии и участники остаются в проверочной БД. Для `pytest` используйте другую
+ пустую БД `*_test`.
+ 
+ `python -m pytest tests/test_participants.py` проверяет присоединение,
+ восстановление после нового HTTP-клиента, отдельные идентичности при совпадающих
+ именах, изоляцию по сессии, ошибки авторизации и отсутствие исходного credential
+ в PostgreSQL и в снимке лобби. `python -m pytest tests/test_lobby_websocket.py`
+ проверяет WebSocket-снимок и обновления, авторизацию handshake, переподключение,
+ отключение и отсутствие credential/digest в payload.
+ 
+ ## Вход администратора
+ 
+ В предварительной модели есть один администратор из окружения, без таблицы
+ пользователей, регистрации, refresh-токенов и интерфейса входа. Используются
+ PyJWT 2.10.1 и argon2-cffi 25.1.0. Argon2 — рекомендуемый алгоритм в
+ [официальном руководстве FastAPI](https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/).
+ Готовая библиотека Argon2 проверяет хеш; криптография приложения не реализуется.
+ 
+ В окне запуска сервера задайте три переменные. Пароль вводится без отображения,
+ хеш и случайный ключ передаются из дочернего Python в переменные PowerShell
+ без вывода в консоль. Не сохраняйте эти значения в репозитории или истории команд:
+ 
+ ```powershell
+ $env:ADMIN_USERNAME = Read-Host 'Логин администратора'
+ $env:ADMIN_PASSWORD_HASH = python -c "from getpass import getpass; from argon2 import PasswordHasher; p=getpass('Admin password: '); assert p, 'Password must not be empty'; print(PasswordHasher().hash(p))"
+ $env:JWT_SIGNING_KEY = python -c "import secrets; print(secrets.token_urlsafe(48))"
+ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ ```
+ 
+ `ADMIN_USERNAME` — непустая строка; `ADMIN_PASSWORD_HASH` — корректный Argon2-хеш
+ непустого пароля; `JWT_SIGNING_KEY` — случайный секрет минимум 32 байта UTF-8
+ (проверка длины не доказывает случайность, используйте генератор выше).
+ Переменные читаются при запросе, `.env` автоматически не загружается.
+ При отсутствующей или испорченной настройке вход и защищённый доступ дают `401`.
+ Ключа по умолчанию нет. `/health` не требует этих настроек и не обращается к БД.
+ 
+ Во втором окне выполните JSON-вход, затем команду создания сессии выше:
+ 
+ ```powershell
+ $credential = Get-Credential -Message 'Администратор IPO'
+ $body = @{ username = $credential.UserName; password = $credential.GetNetworkCredential().Password } | ConvertTo-Json
+ $login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/auth/login `
+     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+ Remove-Variable body, credential
+ # Не выводите access_token: используйте $login в Authorization при создании сессии.
+ ```
+ 
+ Успех входа: `200` с `access_token`, `token_type="bearer"`, `expires_in=1800`.
+ JWT содержит только логин в `sub` и срок в `exp`; содержимое JWT доступно читателю
+ токена, пароль и хеш туда не включаются. Подпись HS256 фиксирована сервером;
+ `sub` и `exp` обязательны, `sub` должен совпадать с настроенным администратором.
+ Неверный логин или пароль дают одинаковый `401 {"detail":"Invalid credentials"}`.
+ Некорректное тело входа даёт `422 {"detail":"Invalid login request"}` без отражения
+ введённых данных. Отсутствующий, просроченный, подменённый или некорректный Bearer
+ даёт `401` до обращения к БД и создания записи. После истечения 30 минут войдите
+ повторно. Смена ключа аннулирует прежние токены; смена пароля сама по себе их
+ не отзывает. Индивидуальный отзыв, rate limiting и аудит входов пока не реализованы.
+ Для доступа вне loopback требуется HTTPS на уровне развёртывания.
+ 
+ `python -m pytest tests/test_auth.py` проверяет вход, JWT, безопасные ошибки
+ и отказы с проверкой отсутствия записи на выделенной PostgreSQL. Полный набор
+ сохраняет прежние проверки IPO-001–003 и использует настоящий вход для API-тестов.
+ 
+ ## Расчёт P&L
+ 
+ `app.pnl.calculate_act_pnl(PnlInputs(...))` — чистый расчёт одного акта без обращения
+ к БД. Неизменяемый `PnlInputs` принимает `act_number` (целое 1–7), `clients`
+ (целое от нуля), а также `average_price`, `orders_per_client`,
+ `advertising_budget`, `marketing_payroll`, `development_payroll`,
+ `support_payroll`, `balance_at_start` как конечные `Decimal`. Все значения,
+ кроме начального баланса, должны быть неотрицательными. `bool` в целочисленных
+ полях, `float` и другие типы вместо `Decimal` отклоняются с `TypeError`;
+ недопустимые значения — с `ValueError`.
+ 
+ `PnlResult` содержит `arpc`, `gross_revenue`, `total_cogs`, `operating_costs`,
+ `result`, `balance_after_result`, а также серверные константы `unit_cogs` и
+ `business_costs`. Константы актов 1–7 взяты из строк 8 и 14 листа `8 PnL`:
+ `1; 1.1; 1.2; 1.3; 1.35; 1.4; 1.45` и `30; 45; 60; 80; 100; 120; 140`.
+ ARPC равен цене, умноженной на покупки на клиента; выручка — ARPC, умноженному
+ на клиентов; CoGS — покупкам на клиента, умноженным на клиентов и себестоимость
+ заказа. Operating Costs складывает три ФОТ и расходы на бизнес. Из выручки
+ вычитаются CoGS, реклама (ровно один раз) и Operating Costs. Финансовый результат
+ прибавляется к начальному балансу; отрицательные результат и баланс допустимы.
+ 
+ Вычисления используют Decimal без преобразования во float и без округления
+ до копеек; действует текущий контекст Decimal. Число клиентов и расходы передаются
+ готовыми: расчёт клиентской базы, ФОТ, кредитов и условия банкротства эта функция
+ не определяет. Например, входы Excel для первого акта дают ARPC `2.47`, выручку
+ `103.74`, CoGS `54.60`, Operating Costs `190`, результат `-140.86` и остаток
+ `534.14` при начальном балансе `675`.
+ 
+ Проверка без БД из `backend`: `python -m pytest tests/test_pnl.py`.
+ 
+ ## Запуск первого акта
+ 
+ `POST /sessions/{session_id}/acts/1/start` требует Bearer администратора.
+ Отправьте запрос без тела, с `{}` или `null`. Любые поля тела, включая
+ `roll`, `balance` и `action_points`, дают `422`.
+ 
+ Первый запуск доступен в `preparation`, когда назначены капитан и все четыре
+ роли `cto`, `cmo`, `people`, `cfo`. Сервер сохраняет один бросок d10, состояние
+ акта и статус `act_one` в общей транзакции. При старте доступны 675.00 денег,
+ 60 клиентов, 130 очков действий, две junior-команды, уровень найма 0,
+ вместимость 2 и три эксперимента на команду. Бонус 1 добавляет 10 очков действий,
+ бонус 9 — 10 клиентов. Остальные восемь бонусов сохраняются как доступное
+ одноразовое право; их активация пока не реализована.
+ 
+ Успех — `200` со снимком: `session_id`, `act_number=1`, `status="act_one"`,
+ `started_at` с часовым поясом, `balance` строкой Decimal, `clients`,
+ `action_points`, `hiring_level`, `hiring_capacity`,
+ `hired_development_team_grades`, `experiments_per_development_team` и
+ `starting_bonus {roll, code, description, available}`. Для бонусов 1 и 9
+ `available=false`. Credential и digest в ответ не включаются.
+ 
+ Повторный и параллельный запрос возвращает текущие сохранённые значения,
+ включая последующие покупки, без нового броска или начисления ресурсов.
+ Неизвестная сессия даёт `404`, неподходящая фаза, неготовая команда либо
+ отсутствующее состояние при статусе `act_one` — `409`. Неавторизованный запрос
+ получает `401` до доступа к БД. Сбой подключения, записи или commit даёт
+ санитизированный `503` с откатом всей транзакции.
+ 
+ После commit сервер публикует актуальный статус в WebSocket лобби. Ошибка
+ публикации сохраняет успешный HTTP-результат; повтор может обновить лобби.
+ Рассылка работает в одном процессе приложения. Миграция
+ `0006_act_one_states` добавляет отдельную таблицу состояния с каскадом при
+ удалении сессии. Проверки: `python -m pytest tests/test_act_one_start.py` на
+ выделенной PostgreSQL по инструкции выше.
+ 
+ ## Получение снимка первого акта
+ 
+ `GET /sessions/{session_id}/acts/1` возвращает тот же `ActOneSnapshot` с
+ текущими сохранёнными ресурсами, бонусом и покупками. Передайте Bearer credential
+ участника этой сессии; роль не обязательна. Администраторский JWT не заменяет
+ credential участника. Снимок доступен после повторного подключения и не меняет
+ состояние, не бросает кубик и не начисляет ресурсы.
+ 
+ Без/неверный/чужой credential и неизвестная сессия дают одинаковый
+ `401` с `WWW-Authenticate: Bearer`. Только участник своей сессии получает `409`
+ до первого акта, после него или при отсутствии сохранённого состояния.
+ Авторизация, фаза и состояние читаются одним согласованным SELECT.
+ Ошибки БД возвращают санитизированный `503`. Проверка на выделенной PostgreSQL:
+ `python -m pytest tests/test_act_one_snapshot.py`.
+ 
+ ## Первая покупка стратегии найма
+ 
+ `POST /sessions/{session_id}/acts/1/hiring/upgrade` доступен участнику своей
+ сессии с ролью `people` по participant Bearer. Капитан, другие роли и
+ администраторский JWT сами по себе это право не дают. Тело отсутствует,
+ `null` или `{}`; клиентские поля, включая цену и уровень, возвращают `422`.
+ 
+ В `act_one` первая покупка стоит ровно 30 очков действий, повышает уровень
+ найма 0→1 и вместимость 2→3. Фактический состав остаётся две junior-команды;
+ деньги, клиенты, эксперименты и стартовый бонус сохраняются. Повторные и
+ параллельные запросы возвращают текущий снимок `ActOneSnapshot` с `200` и не
+ списывают очки повторно, в том числе когда после покупки осталось меньше 30 AP.
+ Повторный start и новое подключение также возвращают сохранённую покупку.
+ 
+ Без/неверный/чужой credential и неизвестная сессия дают одинаковый `401` с
+ `WWW-Authenticate: Bearer`; свой участник без `people` получает `403`.
+ Авторизация и роль проверяются до фазы. Неактивный первый акт, отсутствие
+ состояния или недостаток очков до первой покупки дают `409` без изменений.
+ Строковая блокировка сессии сериализует покупку с запуском акта; состояние
+ читается после получения блокировки. Ошибки записи/commit возвращают
+ санитизированный `503` с полным откатом. Проверки на выделенной PostgreSQL:
+ `python -m pytest tests/test_act_one_hiring.py`.
+ 
+ ## Предпросмотр P&L первого акта
+ 
+ `POST /sessions/{session_id}/acts/1/pnl/preview` доступен участнику своей
+ сессии с ролью `cfo` по participant Bearer. Запрос вычисляет P&L по готовым
+ входам и возвращает расчёт, сохраняя фазу и ресурсы сессии.
+ 
+ Все поля тела обязательны:
+ 
+ ```json
+ {
+   "average_price": "1.9",
+   "orders_per_client": "1.3",
+   "clients": 42,
+   "advertising_budget": "0",
+   "marketing_payroll": "10",
+   "development_payroll": "90",
+   "support_payroll": "60"
+ }
+ ```
+ 
+ `clients` — строго целое число от нуля; bool, дробные числа и строки
+ не принимаются. Остальные поля — конечные неотрицательные Decimal, передаваемые
+ JSON-числом или строкой. Сервер задаёт акт 1 и начальный баланс из сохранённого
+ состояния; поля `act_number`, `balance_at_start` и любые дополнительные поля
+ запрещены. Неверные значения, NaN/Infinity (включая сырой нестандартный JSON),
+ malformed JSON и непредставимые при расчёте Decimal дают безопасный `422`.
+ Ошибки валидации всех новых POST-команд первого акта возвращают общий detail
+ `Invalid act one request`, чтобы не отражать невалидные числовые значения.
+ 
+ Успех — `200` с `arpc`, `gross_revenue`, `unit_cogs`, `total_cogs`,
+ `business_costs`, `operating_costs`, `result`, `balance_after_result`.
+ Все Decimal сериализуются строками без дополнительного округления до копеек.
+ Пример при сохранённом балансе 675.00 даёт результат -140.86 и остаток 534.14.
+ Отрицательные результат и расчётный остаток допустимы. Предпросмотр не записывает
+ P&L, не меняет баланс/AP/клиентов/команды/бонусы и не завершает акт.
+ 
+ Auth/role проверяются до фазы: `401` для отсутствующего/неверного/чужого
+ credential, admin JWT и неизвестной сессии, `403` для своей другой роли,
+ `409` вне активного первого акта или без состояния, санитизированный `503`
+ при ошибке БД. Авторизация, роль, фаза и состояние читаются одним SELECT.
+ Проверки: `python -m pytest tests/test_act_one_pnl.py`.
++
++## Сквозная проверка API первого акта
++
++`tests/test_act_one_end_to_end.py` проверяет три сценария стартового бонуса:
++1 (+10 AP), 9 (+10 клиентов) и 7 (отложенное право на эксперимент).
++Каждый сценарий создаёт две сессии реальным входом администратора, по четыре
++участника с отдельными credential в каждой, запускает подготовку, назначает
++капитанов и выбирает роли от имени самих участников через публичный HTTP API.
++Далее проверяет старт, снимки, покупку people и P&L preview cfo по примеру Excel
++(-140.86 и 534.14), запрет действий другим ролям и чужой сессии, повторы
++и восстановление личности в новых TestClient с сохранёнными credential.
++
++На две сессии приходится ровно два броска; повторы и reconnect их не добавляют.
++Покупка списывает 30 AP один раз и меняет только уровень/вместимость, оставляя
++две junior-команды. Preview сохраняет баланс 675.00 и фазу act_one. После
++действий первой сессии снимок второй остаётся прежним. Игровые ответы проверяются
++на отсутствие credential/digest; сохранённые состояния, роли и участники
++сверяются независимым чтением через новый engine после закрытия HTTP-клиентов.
++Тест не записывает и не инициализирует состояние напрямую в БД.
++
++Из `backend` с подготовленной выделенной пустой PostgreSQL:
++
++```powershell
++python -m pytest tests/test_act_one_end_to_end.py -q
++python -m pytest -q
++python -m ruff check .
++python -m ruff format --check .
++```
++
++Отдельный сценарий ожидает `3 passed`. Это проверка первого API-среза на
++настоящей PostgreSQL; полноценный цикл экономического акта, клиентские формулы,
++активация отложенных бонусов и завершение акта сюда не входят. HTTP TestClient
++моделируют отдельные клиенты; браузерный интерфейс не проверяется. Ограничение
++браузерного WebSocket описано выше и этой проверкой не изменяется.
+--- /dev/null
++++ b/backend/tests/test_act_one_end_to_end.py
+@@ -0,0 +1,382 @@
++"""Public-HTTP first-act scenarios with independent PostgreSQL verification."""
++
++import hashlib
++import json
++from contextlib import ExitStack
++from dataclasses import dataclass
++from datetime import datetime
++from decimal import Decimal
++from unittest.mock import Mock, call
++from uuid import UUID
++
++import pytest
++from fastapi.testclient import TestClient
++from httpx import Response
++from sqlalchemy import select
++
++from app.database import create_database_engine
++from app.main import app
++from app.models import ActOneState, GameSession, Participant, RoleAssignment
++
++ROLES = ("cto", "cmo", "people", "cfo")
++PNL_INPUTS = {
++    "average_price": "1.9",
++    "orders_per_client": "1.3",
++    "clients": 42,
++    "advertising_budget": "0",
++    "marketing_payroll": "10",
++    "development_payroll": "90",
++    "support_payroll": "60",
++}
++PNL_EXPECTED = {
++    "arpc": "2.47",
++    "gross_revenue": "103.74",
++    "unit_cogs": "1",
++    "total_cogs": "54.6",
++    "business_costs": "30",
++    "operating_costs": "190",
++    "result": "-140.86",
++    "balance_after_result": "534.14",
++}
++
++
++@dataclass
++class Team:
++    session_id: str
++    actors: dict[str, TestClient]
++    members: dict[str, dict[str, str]]
++
++    @property
++    def act_path(self):
++        return f"/sessions/{self.session_id}/acts/1"
++
++
++def _assert_no_secrets(payload, credentials):
++    secret_fields = {
++        "credential",
++        "participant_credential",
++        "credential_digest",
++        "digest",
++        "token",
++        "access_token",
++    }
++
++    def check_keys(value):
++        if isinstance(value, dict):
++            for key, child in value.items():
++                assert key not in secret_fields
++                check_keys(child)
++        elif isinstance(value, list):
++            for child in value:
++                check_keys(child)
++
++    check_keys(payload)
++    serialized = json.dumps(payload)
++    for credential in credentials:
++        assert credential not in serialized
++        assert hashlib.sha256(credential.encode()).hexdigest() not in serialized
++
++
++def _game_payload(response: Response, credentials, status=200):
++    assert response.status_code == status, response.text
++    payload = response.json()
++    _assert_no_secrets(payload, credentials)
++    return payload
++
++
++def _prepare_team(admin: TestClient, resources: ExitStack, name: str) -> Team:
++    created = _game_payload(admin.post("/sessions", json={"name": name}), [], 201)
++    session_id = created["id"]
++    assert created["status"] == "lobby"
++    actors, members = {}, {}
++    for role in ROLES:
++        actor = TestClient(app)
++        resources.callback(actor.close)
++        joined = actor.post(
++            f"/sessions/{session_id}/participants",
++            json={"display_name": f"{name} {role}"},
++        )
++        assert joined.status_code == 201
++        member = joined.json()
++        actor.headers["Authorization"] = f"Bearer {member['participant_credential']}"
++        actors[role], members[role] = actor, member
++    credentials = [member["participant_credential"] for member in members.values()]
++    preparation_path = f"/sessions/{session_id}/preparation"
++    prepared = _game_payload(admin.post(f"{preparation_path}/start"), credentials)
++    assert prepared["status"] == "preparation"
++    captain = _game_payload(
++        admin.put(
++            f"{preparation_path}/captain", json={"participant_id": members["cto"]["id"]}
++        ),
++        credentials,
++    )
++    assert captain["captain_participant_id"] == members["cto"]["id"]
++    for role in ROLES:
++        assigned = _game_payload(
++            actors[role].put(
++                f"{preparation_path}/roles/{role}",
++                json={"participant_id": members[role]["id"]},
++            ),
++            credentials,
++        )
++        assert assigned == {
++            "session_id": session_id,
++            "role_code": role,
++            "participant_id": members[role]["id"],
++        }
++    snapshot = _game_payload(actors["cto"].get(preparation_path), credentials)
++    assert snapshot["id"] == session_id
++    assert snapshot["name"] == name
++    assert snapshot["status"] == "preparation"
++    assert snapshot["captain_participant_id"] == members["cto"]["id"]
++    assert snapshot["roles"] == {role: members[role]["id"] for role in ROLES}
++    assert snapshot["participants"] == [
++        {"id": member["id"], "display_name": member["display_name"]}
++        for member in members.values()
++    ]
++    return Team(session_id, actors, members)
++
++
++def _assert_initial_snapshot(snapshot, team, roll, code, points, clients, available):
++    assert snapshot["session_id"] == team.session_id
++    assert snapshot["act_number"] == 1
++    assert snapshot["status"] == "act_one"
++    assert datetime.fromisoformat(snapshot["started_at"]).utcoffset() is not None
++    assert snapshot["balance"] == "675.00"
++    assert snapshot["clients"] == clients
++    assert snapshot["action_points"] == points
++    assert snapshot["hiring_level"] == 0
++    assert snapshot["hiring_capacity"] == 2
++    assert snapshot["hired_development_team_grades"] == ["junior", "junior"]
++    assert snapshot["experiments_per_development_team"] == 3
++    assert snapshot["starting_bonus"]["roll"] == roll
++    assert snapshot["starting_bonus"]["code"] == code
++    assert snapshot["starting_bonus"]["available"] is available
++    assert snapshot["starting_bonus"]["description"]
++
++
++@pytest.mark.parametrize(
++    "roll, code, points, clients, available",
++    [
++        (1, "action_points", 140, 60, False),
++        (9, "clients", 130, 70, False),
++        (7, "experiment", 130, 60, True),
++    ],
++)
++def test_first_act_public_api_flow_is_persistent_and_isolates_two_sessions(
++    migrated_database, auth_config, monkeypatch, roll, code, points, clients, available
++):
++    monkeypatch.setenv("DATABASE_URL", migrated_database)
++    random = Mock(side_effect=[roll - 1, 3])
++    monkeypatch.setattr("app.act_one.secrets.randbelow", random)
++    with ExitStack() as resources:
++        # One lifespan owns the process-wide lobby hub. Actor clients have
++        # independent headers while sharing this already-running application.
++        admin = resources.enter_context(TestClient(app))
++        login = admin.post(
++            "/auth/login",
++            json={
++                "username": auth_config["ADMIN_USERNAME"],
++                "password": "fictional-test-password",
++            },
++        )
++        assert login.status_code == 200
++        admin.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
++        first = _prepare_team(admin, resources, "Первая команда")
++        second = _prepare_team(admin, resources, "Вторая команда")
++        assert first.session_id != second.session_id
++        teams = (first, second)
++        all_members = [member for team in teams for member in team.members.values()]
++        credentials = [member["participant_credential"] for member in all_members]
++        assert len(set(credentials)) == 8
++        assert len({member["id"] for member in all_members}) == 8
++
++        initial_first = _game_payload(
++            admin.post(f"{first.act_path}/start"), credentials
++        )
++        initial_second = _game_payload(
++            admin.post(f"{second.act_path}/start"), credentials
++        )
++        _assert_initial_snapshot(
++            initial_first, first, roll, code, points, clients, available
++        )
++        _assert_initial_snapshot(
++            initial_second, second, 4, "orders_per_client", 130, 60, True
++        )
++        assert random.call_args_list == [call(10), call(10)]
++        for team, expected in ((first, initial_first), (second, initial_second)):
++            for actor in team.actors.values():
++                assert _game_payload(actor.get(team.act_path), credentials) == expected
++
++        for role, actor in first.actors.items():
++            if role != "people":
++                forbidden = actor.post(f"{first.act_path}/hiring/upgrade")
++                _game_payload(forbidden, credentials, 403)
++            if role != "cfo":
++                forbidden = actor.post(f"{first.act_path}/pnl/preview", json=PNL_INPUTS)
++                _game_payload(forbidden, credentials, 403)
++
++        # Cross-session credentials cannot reveal state or mutate either team.
++        for target, foreign in ((first, second), (second, first)):
++            attempts = [
++                foreign.actors["cto"].get(target.act_path),
++                foreign.actors["people"].post(f"{target.act_path}/hiring/upgrade"),
++                foreign.actors["cfo"].post(
++                    f"{target.act_path}/pnl/preview", json=PNL_INPUTS
++                ),
++            ]
++            for denied in attempts:
++                assert _game_payload(denied, credentials, 401) == {
++                    "detail": "Invalid credentials"
++                }
++                assert denied.headers["WWW-Authenticate"] == "Bearer"
++
++        bought = _game_payload(
++            first.actors["people"].post(f"{first.act_path}/hiring/upgrade"), credentials
++        )
++        expected_first = {
++            **initial_first,
++            "action_points": points - 30,
++            "hiring_level": 1,
++            "hiring_capacity": 3,
++        }
++        assert bought == expected_first
++        assert (
++            _game_payload(second.actors["cto"].get(second.act_path), credentials)
++            == initial_second
++        )
++
++        preview = _game_payload(
++            first.actors["cfo"].post(f"{first.act_path}/pnl/preview", json=PNL_INPUTS),
++            credentials,
++        )
++        assert preview == PNL_EXPECTED
++        assert (
++            _game_payload(first.actors["cfo"].get(first.act_path), credentials)
++            == expected_first
++        )
++        assert expected_first["balance"] == "675.00"
++        assert (
++            _game_payload(second.actors["cto"].get(second.act_path), credentials)
++            == initial_second
++        )
++
++        assert (
++            _game_payload(admin.post(f"{first.act_path}/start"), credentials)
++            == expected_first
++        )
++        assert (
++            _game_payload(admin.post(f"{second.act_path}/start"), credentials)
++            == initial_second
++        )
++        assert (
++            _game_payload(
++                first.actors["people"].post(f"{first.act_path}/hiring/upgrade"),
++                credentials,
++            )
++            == expected_first
++        )
++
++        for role in ("people", "cfo"):
++            # Restore identity with the saved credential in a fresh HTTP client.
++            refreshed = TestClient(app, headers=dict(first.actors[role].headers))
++            resources.callback(refreshed.close)
++            identity = _game_payload(
++                refreshed.get(f"/sessions/{first.session_id}/participants/me"),
++                credentials,
++            )
++            assert identity["id"] == first.members[role]["id"]
++            assert (
++                _game_payload(refreshed.get(first.act_path), credentials)
++                == expected_first
++            )
++            if role == "people":
++                repeated = _game_payload(
++                    refreshed.post(f"{first.act_path}/hiring/upgrade"), credentials
++                )
++                assert repeated == expected_first
++            else:
++                repeated = _game_payload(
++                    refreshed.post(f"{first.act_path}/pnl/preview", json=PNL_INPUTS),
++                    credentials,
++                )
++                assert repeated == PNL_EXPECTED
++        assert (
++            _game_payload(second.actors["cfo"].get(second.act_path), credentials)
++            == initial_second
++        )
++        assert random.call_args_list == [call(10), call(10)]
++
++    # Read through a new engine after all HTTP clients close. No test code
++    # writes to PostgreSQL; all preparation and economic actions used HTTP.
++    identifiers = [UUID(team.session_id) for team in teams]
++    engine = create_database_engine(migrated_database)
++    try:
++        with engine.connect() as connection:
++            rows = (
++                connection.execute(
++                    select(
++                        ActOneState.__table__,
++                        GameSession.status,
++                        GameSession.captain_participant_id,
++                    )
++                    .join(GameSession, GameSession.id == ActOneState.session_id)
++                    .where(ActOneState.session_id.in_(identifiers))
++                )
++                .mappings()
++                .all()
++            )
++            persisted_members = connection.execute(
++                select(
++                    Participant.id,
++                    Participant.session_id,
++                    Participant.credential_digest,
++                ).where(Participant.session_id.in_(identifiers))
++            ).all()
++            persisted_roles = set(
++                connection.execute(
++                    select(
++                        RoleAssignment.session_id,
++                        RoleAssignment.role_code,
++                        RoleAssignment.participant_id,
++                    ).where(RoleAssignment.session_id.in_(identifiers))
++                ).all()
++            )
++    finally:
++        engine.dispose()
++    stored = {str(row["session_id"]): row for row in rows}
++    assert set(stored) == {first.session_id, second.session_id}
++    for team, expected in ((first, expected_first), (second, initial_second)):
++        state = stored[team.session_id]
++        assert state["status"] == "act_one"
++        assert state["captain_participant_id"] == UUID(team.members["cto"]["id"])
++        assert state["started_at"] == datetime.fromisoformat(expected["started_at"])
++        assert state["balance"] == Decimal("675.00")
++        for field in (
++            "clients",
++            "action_points",
++            "hiring_level",
++            "hiring_capacity",
++            "hired_development_team_grades",
++            "experiments_per_development_team",
++        ):
++            assert state[field] == expected[field]
++        assert state["starting_roll"] == expected["starting_bonus"]["roll"]
++        assert (
++            state["starting_bonus_available"] is expected["starting_bonus"]["available"]
++        )
++    assert len(persisted_members) == 8
++    expected_members = {
++        UUID(member["id"]): (UUID(team.session_id), member["participant_credential"])
++        for team in teams
++        for member in team.members.values()
++    }
++    for participant_id, session_id, digest in persisted_members:
++        expected_session, credential = expected_members[participant_id]
++        assert session_id == expected_session
++        assert digest == hashlib.sha256(credential.encode()).hexdigest()
++    assert persisted_roles == {
++        (UUID(team.session_id), role, UUID(team.members[role]["id"]))
++        for team in teams
++        for role in ROLES
++    }
+--- /dev/null
++++ b/docs/tasks/IPO-020/report.md
+@@ -0,0 +1,117 @@
++# IPO-020 — отчёт исполнителя
++
++**Status:** DONE
++
++## What you implemented
++
++- Новый `tests/test_act_one_end_to_end.py` содержит три параметризованных
++  сквозных сценария для бонусов1 (+10AP),9 (+10клиентов),7 (отложенный эксперимент).
++  В каждом создаются две сессии; вторая получает фиксированный бонус4.
++- Реальный admin login, создание сессий, восемь отдельных участников и
++  credential, preparation, капитаны, самостоятельный выбор четырёх ролей,
++  снимки подготовки, start/GET/hiring/P&L preview выполняются только через
++  публичный HTTP API. Нет helpers с прямой инициализацией или записью в БД.
++- Проверены AP140→110/AP130→100, вместимость2→3 при двух junior, сохранность
++  остальных ресурсов/бонуса, повторы start/покупки и новые TestClient с
++  восстановлением личности по credential. RNG фиксируется тестом и вызывается
++  ровно два раза на две сессии, включая все повторы и reconnect.
++- Остальные роли получают403 при покупке/preview. Чужой credential в GET/
++  hiring/preview получает401 в обоих направлениях между сессиями.
++  Состояние второй сессии проверяется неизменным после действий первой.
++- P&L по готовым входам Excel даёт -140.86/534.14; постоянный баланс остаётся
++  675.00, фаза act_one. Клиентская база и завершение акта не рассчитываются.
++- Игровые ответы проверяются на секретные поля, реальные credential и SHA256.
++  После закрытия HTTP-клиентов новый engine выполняет только SELECT:
++  независимо сверяются состояния, капитаны, участники, digest и роли.
++- README описывает сценарии и проверки; прежнее утверждение об отсутствии
++  экономических актов обновлено до фактического первого API-среза. Сохранены
++  инструкции запуска и ограничение браузерного WebSocket.
++
++Продуктовые Python-файлы и миграции побайтно сохранены относительно
++`/private/tmp/ipo-team-review-snapshots/IPO-020/before`; менялись только
++новый тест, README и этот отчёт.
++
++## What you tested and test results
++
++Рабочая папка:
++`/private/tmp/ipo-team-implementation-egw7qray/backend`.
++Python:
++`/Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python`.
++
++Предварительные проверки исполнителя без PostgreSQL:
++
++```text
++python -m pytest tests/test_act_one_end_to_end.py --collect-only -q
++3 tests collected in 0.03s
++
++python -m ruff check .
++All checks passed!
++
++python -m ruff format --check .
++40 files already formatted
++```
++
++Первый focused-запуск контроллера на PostgreSQL выявил дефект нового тестового
++helper, не продуктового кода:
++
++```text
++python -m pytest tests/test_act_one_end_to_end.py -q --tb=short
++3 failed in 1.96s
++```
++
++Причина: `_assert_no_secrets` запрещал слово `credential` в любой части JSON,
++поэтому ожидаемый 401 `{"detail":"Invalid credentials"}` ошибочно считался
++утечкой (строка56 первого снимка). Исправление: рекурсивно запрещены секретные
++ключи credential/participant_credential/credential_digest/digest/token/access_token,
++а реальные значения всех восьми credential и их SHA256 по-прежнему запрещены
++во всём сериализованном payload. Обычный текст detail разрешён. Проверка реальных
++токенов не ослаблена, продуктовый код не менялся.
++
++Исполнитель проверил helper без БД: обычный detail принят; пять кейсов
++вложенных секретных полей, реального credential и его SHA256 отклонены.
++Вывод: `Helper accepts ordinary detail and rejects five secret leak cases.`
++После исправления повторены Ruff check/format с результатами выше; код снова
++заморожен.
++
++Контроллер выполнил итоговые команды на выделенной настоящей PostgreSQL с
++require_escalated для localhost:
++
++```text
++env TEST_DATABASE_URL=postgresql+psycopg://ipo_test_runner@127.0.0.1:55439/ipo_act_one_test /Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python -m pytest tests/test_act_one_end_to_end.py -q --tb=short
++3 passed in 2.50s
++
++env TEST_DATABASE_URL=postgresql+psycopg://ipo_test_runner@127.0.0.1:55439/ipo_act_one_test /Users/yaroslavmikhailov/Kontur-IPO-game/backend/.venv/bin/python -m pytest -q --tb=short
++460 passed in 34.05s
++exit 0, без предупреждений
++```
++
++Результаты переданы контроллером. Исполнитель не подключался к PostgreSQL
++из sandbox. Код и README после последней заморозки не менялись.
++
++## TDD Evidence
++
++TDD brief не требовал. Первый отрицательный focused-запуск выявил ошибку
++тестовой проверки, история исправления и итоговый GREEN приведены выше.
++
++## Files changed
++
++- `backend/tests/test_act_one_end_to_end.py` — три сквозных сценария.
++- `backend/README.md` — сквозная проверка и актуальная область реализации.
++- `docs/tasks/IPO-020/report.md` — этот отчёт.
++
++## Self-review findings
++
++Просмотрен полный diff относительно before020. Проверены только публичный
++HTTP setup, отдельные actor/credential, независимые ожидаемые значения,
++два вызова RNG, идемпотентность, сравнение второй сессии, отсутствие прямых
++записей БД и неизменность продуктовых файлов. Первый self-review не выявил
++ошибку поиска слова credential; её обнаружил контроллер focused-запуском.
++После исправления отдельно проверены рекурсивные ключи и реальные секретные
++значения, затем focused/full PostgreSQL suite прошли полностью.
++Итоговых замечаний нет. Предыдущие отчёты и чужие изменения сохранены.
++
++## Any issues or concerns
++
++Нет. Готово к независимому ревью; коммит выполняет контроллер после одобрения.
++Коммиты не создавались. HTTP TestClient моделируют отдельные клиенты;
++браузерный UI и полный цикл экономического акта остаются вне проверки.

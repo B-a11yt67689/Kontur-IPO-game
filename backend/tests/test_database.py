@@ -58,7 +58,7 @@ def test_migration_schema(migrated_database: str) -> None:
             )
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0005_role_assignments"
+                == "0006_act_one_states"
             )
     finally:
         engine.dispose()
